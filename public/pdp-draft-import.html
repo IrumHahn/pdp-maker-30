@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3003 작업 히스토리 가져오기</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #102532;
+        --muted: #5f6b73;
+        --line: #d9e1de;
+        --accent: #4cb7aa;
+        --danger: #8b4138;
+        --surface: #fbfaf6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 28px;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: var(--surface);
+      }
+
+      main {
+        width: min(680px, 100%);
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 24px 70px rgba(18, 33, 47, 0.12);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 26px;
+        line-height: 1.2;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: 12px 0 0;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .status {
+        margin-top: 20px;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid rgba(76, 183, 170, 0.2);
+        background: rgba(76, 183, 170, 0.08);
+        color: var(--ink);
+        font-weight: 700;
+        line-height: 1.6;
+      }
+
+      .status.error {
+        border-color: rgba(139, 65, 56, 0.18);
+        background: rgba(139, 65, 56, 0.08);
+        color: var(--danger);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 20px;
+      }
+
+      a,
+      button {
+        min-height: 42px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(18, 33, 47, 0.1);
+        font: inherit;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      button {
+        cursor: pointer;
+        background: #171a1f;
+        color: #ffffff;
+      }
+
+      a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #ffffff;
+        color: var(--ink);
+      }
+
+      iframe {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>3003 작업 히스토리 가져오기</h1>
+      <p>
+        이 페이지는 같은 브라우저에 저장된 <strong>http://127.0.0.1:3003</strong>의 PDP Maker 작업 목록을
+        <strong>http://127.0.0.1:3005</strong> 저장소로 복사합니다.
+      </p>
+      <div class="status" id="status">3003 저장 작업을 확인하는 중입니다.</div>
+      <div class="actions">
+        <button id="retryButton" type="button">다시 복사</button>
+        <a href="/pdp-maker">3005 PDP Maker 열기</a>
+      </div>
+      <iframe
+        id="exportFrame"
+        src="http://127.0.0.1:3003/pdp-draft-export.html"
+        title="3003 draft exporter"
+      ></iframe>
+    </main>
+
+    <script>
+      const DB_NAME = "hanirum-pdp-maker";
+      const STORE_NAME = "drafts";
+      const DB_VERSION = 2;
+      const EXPORT_ORIGIN = "http://127.0.0.1:3003";
+      const status = document.getElementById("status");
+      const retryButton = document.getElementById("retryButton");
+      const exportFrame = document.getElementById("exportFrame");
+
+      function setStatus(message, isError = false) {
+        status.textContent = message;
+        status.classList.toggle("error", isError);
+      }
+
+      function openDatabase() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(DB_NAME, DB_VERSION);
+          request.onerror = () => reject(request.error || new Error("3005 저장소를 열지 못했습니다."));
+          request.onupgradeneeded = () => {
+            const database = request.result;
+            if (!database.objectStoreNames.contains(STORE_NAME)) {
+              database.createObjectStore(STORE_NAME, { keyPath: "id" });
+            }
+          };
+          request.onsuccess = () => resolve(request.result);
+        });
+      }
+
+      async function writeDrafts(drafts) {
+        const database = await openDatabase();
+        return new Promise((resolve, reject) => {
+          const transaction = database.transaction(STORE_NAME, "readwrite");
+          const store = transaction.objectStore(STORE_NAME);
+
+          drafts.forEach((draft) => {
+            if (draft && draft.id) {
+              store.put(draft);
+            }
+          });
+
+          transaction.oncomplete = () => {
+            database.close();
+            resolve();
+          };
+          transaction.onerror = () => {
+            database.close();
+            reject(transaction.error || new Error("3005 저장소에 쓰지 못했습니다."));
+          };
+        });
+      }
+
+      async function handleExportMessage(event) {
+        if (event.origin !== EXPORT_ORIGIN || event.data?.type !== "hanirum-pdp-drafts-export") {
+          return;
+        }
+
+        if (!event.data.ok) {
+          setStatus(event.data.message || "3003 저장 작업을 읽지 못했습니다.", true);
+          return;
+        }
+
+        const drafts = Array.isArray(event.data.drafts) ? event.data.drafts : [];
+        if (!drafts.length) {
+          setStatus("3003에서 복사할 저장 작업을 찾지 못했습니다.", true);
+          return;
+        }
+
+        try {
+          await writeDrafts(drafts);
+          setStatus(`${drafts.length}개 저장 작업을 3005로 복사했습니다. 이제 3005 PDP Maker에서 기존작업 열기를 눌러 확인하세요.`);
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : String(error), true);
+        }
+      }
+
+      retryButton.addEventListener("click", () => {
+        setStatus("3003 저장 작업을 다시 확인하는 중입니다.");
+        exportFrame.src = "http://127.0.0.1:3003/pdp-draft-export.html?retry=" + Date.now();
+      });
+
+      window.addEventListener("message", handleExportMessage);
+    </script>
+  </body>
+</html>
