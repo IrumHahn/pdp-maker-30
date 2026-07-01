@@ -139,6 +139,13 @@ const OVERSIZED_STANDARD_MAX_DIMENSION = 4096;
 const LONG_DETAIL_MIN_HEIGHT = 3200;
 const LONG_DETAIL_MIN_RATIO = 4.5;
 
+// Vercel serverless functions reject request bodies over ~4.5MB (413 at the edge, before the
+// function even runs). Keep every client→function upload/payload safely under that ceiling.
+const UPLOAD_MAX_BYTES = 4_000_000;
+const UPLOAD_MAX_EDGE = 4096;
+const UPLOAD_MIN_QUALITY = 0.5;
+const LARGE_ORIGINAL_BYTES = 3_200_000;
+
 export async function prepareImageFile(file: File, options?: { allowLongPageSampling?: boolean }) {
   const headerDimensions = await readImageDimensions(file).catch(() => null);
   const allowLongPageSampling = options?.allowLongPageSampling !== false;
@@ -164,6 +171,13 @@ export async function prepareImageFile(file: File, options?: { allowLongPageSamp
   }
 
   if (isOversizedStandardImage(sourceWidth, sourceHeight)) {
+    return buildStandardImagePayload(sourceImage, file);
+  }
+
+  if (file.size > LARGE_ORIGINAL_BYTES) {
+    // Even at normal dimensions a heavy original (e.g. a high-bit-depth PNG) inflates ~33% as
+    // base64 and would blow past the 4.5MB analyze-request limit, so re-encode it down instead
+    // of sending the raw original.
     return buildStandardImagePayload(sourceImage, file);
   }
 
@@ -212,9 +226,60 @@ export function getPreparedImageStrips(image: unknown): PdpAnalysisStrip[] | und
   return Array.isArray(strips) && strips.length > 0 ? strips : undefined;
 }
 
+// Re-encode an oversized file down to a safe byte budget before uploading it to a serverless
+// function. Long detail pages are optimized server-side (see optimizeImageFileOnServer), which
+// means the ORIGINAL file is uploaded — so a >4.5MB original 413s before sharp ever runs.
+// Preserve aspect ratio, cap the longest edge for cross-browser canvas safety, and trim quality
+// (cheap, keeps resolution) then dimensions until the JPEG fits the budget.
+async function shrinkFileForUpload(file: File): Promise<File> {
+  if (file.size <= UPLOAD_MAX_BYTES) {
+    return file;
+  }
+
+  const image = await loadImage(await readFileAsDataUrl(file));
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+
+  let scale = Math.min(1, UPLOAD_MAX_EDGE / Math.max(sourceWidth, sourceHeight, 1));
+  let quality = 0.85;
+  let lastPayload: ReturnType<typeof canvasToJpegPayload> | null = null;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("이미지 캔버스를 초기화하지 못했습니다.");
+    }
+    context.drawImage(image, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight);
+    lastPayload = canvasToJpegPayload(canvas, quality);
+
+    if (lastPayload.bytes <= UPLOAD_MAX_BYTES) {
+      break;
+    }
+    if (quality > UPLOAD_MIN_QUALITY) {
+      quality = Math.max(UPLOAD_MIN_QUALITY, quality - 0.12);
+    } else {
+      scale *= 0.8;
+    }
+  }
+
+  if (!lastPayload) {
+    return file;
+  }
+
+  const blob = base64ToBlob(lastPayload.base64, "image/jpeg");
+  const baseName = file.name.replace(/\.[^./\\]+$/, "") || "image";
+  return new File([blob], `${baseName}.jpg`, { type: "image/jpeg" });
+}
+
 async function optimizeImageFileOnServer(file: File, allowLongPageSampling: boolean) {
+  const uploadFile = await shrinkFileForUpload(file);
   const formData = new FormData();
-  formData.append("file", file);
+  formData.append("file", uploadFile);
   formData.append("allowLongPageSampling", String(allowLongPageSampling));
 
   const response = await fetch(`${API_BASE_URL}/pdp/optimize-image`, {
