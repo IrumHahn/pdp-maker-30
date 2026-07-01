@@ -1916,16 +1916,16 @@ export function PdpMakerClient() {
                 API 키 설정
               </button>
               <button
+                aria-disabled={true}
                 className={`${styles.secondaryButton} ${styles.headerActionButton}`}
-                onClick={() => {
-                  setIsMobileMenuOpen(false);
-                  setIsKnowledgeOpen(true);
-                  logSetupEvent("setup.knowledge_modal_opened", { trigger: "sidebar" });
-                }}
+                disabled
+                style={{ cursor: "not-allowed", opacity: 0.58 }}
+                title="지식파일 등록은 준비 중입니다."
                 type="button"
               >
                 <FileText size={16} />
-                지식파일 등록{knowledgeItems.length ? ` (${knowledgeItems.length})` : ""}
+                지식파일 등록
+                <KeyRound aria-hidden="true" size={12} style={{ flex: "0 0 auto", marginLeft: 4 }} />
               </button>
               <button
                 className={`${styles.secondaryButton} ${styles.headerActionButton}`}
@@ -1974,15 +1974,16 @@ export function PdpMakerClient() {
               API 키 설정
             </button>
             <button
+              aria-disabled={true}
               className={`${styles.secondaryButton} ${styles.headerActionButton}`}
-              onClick={() => {
-                setIsKnowledgeOpen(true);
-                logSetupEvent("setup.knowledge_modal_opened", { trigger: "topbar" });
-              }}
+              disabled
+              style={{ cursor: "not-allowed", opacity: 0.58 }}
+              title="지식파일 등록은 준비 중입니다."
               type="button"
             >
               <FileText size={16} />
-              지식파일 등록{knowledgeItems.length ? ` (${knowledgeItems.length})` : ""}
+              지식파일 등록
+              <KeyRound aria-hidden="true" size={12} style={{ flex: "0 0 auto", marginLeft: 4 }} />
             </button>
             <button
               className={`${styles.secondaryButton} ${styles.headerActionButton}`}
