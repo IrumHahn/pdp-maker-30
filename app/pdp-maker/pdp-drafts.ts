@@ -80,6 +80,7 @@ export interface PdpEditorDraftState {
   overlaysBySection: Record<number, CanvasLayer[]>;
   defaultCopyLanguage: PdpCopyLanguage;
   notice: string;
+  heroWarning?: string;
   workbenchTab: WorkbenchTab;
   workbenchState: FloatingWorkbenchState;
 }
@@ -453,6 +454,7 @@ function normalizeEditorState(editorState: PdpEditorDraftState | null | undefine
     overlaysBySection,
     defaultCopyLanguage: editorState?.defaultCopyLanguage === "en" ? "en" : "ko",
     notice: editorState?.notice ?? "저장된 작업을 이어서 편집할 수 있습니다.",
+    heroWarning: editorState?.heroWarning ?? "",
     workbenchTab:
       editorState?.workbenchTab === "copy" ||
       editorState?.workbenchTab === "guide" ||

@@ -1341,17 +1341,19 @@ export function PdpMakerClient() {
         usedLongDetailStrips && (sellingPointCount > 0 || weaknessCount > 0)
           ? ` 업로드한 상세페이지에서 셀링포인트 ${sellingPointCount}개와 개선 포인트 ${weaknessCount}개를 읽어 새 구성에 반영했습니다.`
           : "";
-      // Wrong-SKU safety: when the reference page shows multiple products, always ask the user to
-      // verify the chosen product (takes precedence over the lower-priority uncertain-cut notice).
-      const verifyNotice = multiProductDetected
-        ? " 참고: 업로드한 상세페이지에 제품이 여러 개 보입니다. 히어로에 의도한 제품이 맞는지 확인하고, 다르면 추가 정보에 제품명을 적거나 깨끗한 제품 사진을 올려 다시 생성해 주세요."
+      // Failure-visibility: when the tool could not confidently identify a clean product cut (or the
+      // page shows several products), surface a PROMINENT warning banner with a fix action instead of
+      // burying it in the success notice — a wrong hero should be obvious, not silent.
+      const heroWarning = multiProductDetected
+        ? "히어로 제품 확인 필요 — 업로드한 상세페이지에 제품이 여러 개 보여서, 히어로에 의도와 다른 제품이 들어갔을 수 있어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 깨끗한 제품 사진 1장을 대표 이미지로 올려 다시 생성하세요."
         : productCutUncertain
-          ? " 참고: 업로드한 상세페이지에서 깨끗한 제품 컷을 자동으로 확정하지 못해 대표 구간을 사용했습니다. 히어로 제품이 어색하면 깨끗한 제품 사진을 따로 올려 다시 생성해 주세요."
+          ? "히어로 제품 확인 필요 — 이 상세페이지에서 ‘깨끗한 제품컷’을 확신하지 못해(배너·연출컷 위주) 대표 구간으로 히어로를 만들었어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 깨끗한 제품 사진 1장을 대표 이미지로 올려 다시 생성하세요."
           : "";
-      const completedNotice = `${baseCompletedNotice}${insightNotice}${verifyNotice}`;
+      const completedNotice = `${baseCompletedNotice}${insightNotice}`;
       const nextEditorDraftState = {
         ...createDefaultEditorDraftState(nextResult, outputMode),
-        notice: completedNotice
+        notice: completedNotice,
+        heroWarning
       };
 
       isApplyingDraftRef.current = true;
@@ -3547,6 +3549,7 @@ function createDefaultEditorDraftState(result: GeneratedResult, outputMode: PdpO
       : outputMode === "full-image"
         ? "통이미지 모드 전체 섹션을 확인하고, 필요한 컷만 이미지 옵션에서 다시 조정할 수 있습니다."
         : "전체 섹션 컷과 기본 텍스트 레이아웃을 확인한 뒤 바로 편집하거나 다운로드할 수 있습니다.",
+    heroWarning: "",
     workbenchTab: "image",
     workbenchState: {
       x: 756,

@@ -3283,6 +3283,47 @@
   border: 1px solid rgba(174, 108, 99, 0.18);
 }
 
+.heroWarningBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  line-height: 1.6;
+  background: rgba(214, 158, 46, 0.12);
+  color: #7a5312;
+  border: 1px solid rgba(214, 158, 46, 0.42);
+  font-weight: 600;
+}
+
+.heroWarningBanner svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: #c07c14;
+}
+
+.heroWarningText {
+  flex: 1 1 auto;
+}
+
+.heroWarningDismiss {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(214, 158, 46, 0.5);
+  background: rgba(214, 158, 46, 0.16);
+  color: #7a5312;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.heroWarningDismiss:hover {
+  background: rgba(214, 158, 46, 0.26);
+}
+
 .errorDetail {
   margin-top: 10px;
   padding: 14px;

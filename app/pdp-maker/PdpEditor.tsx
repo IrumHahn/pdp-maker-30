@@ -428,6 +428,7 @@ export function PdpEditor({
   const [notice, setNotice] = useState(
     () => initialDraftState?.notice ?? defaultEditorNotice
   );
+  const [heroWarning, setHeroWarning] = useState(() => initialDraftState?.heroWarning ?? "");
   const [sectionOptions, setSectionOptions] = useState<Record<number, ImageGenOptions>>(
     () => normalizeSectionOptions(initialDraftState?.sectionOptions ?? {}, referenceModelUsage)
   );
@@ -695,10 +696,11 @@ export function PdpEditor({
       overlaysBySection,
       defaultCopyLanguage,
       notice,
+      heroWarning,
       workbenchTab,
       workbenchState
     });
-  }, [currentSectionIndex, defaultCopyLanguage, notice, onDraftStateChange, overlaysBySection, sectionOptions, sections, workbenchState, workbenchTab]);
+  }, [currentSectionIndex, defaultCopyLanguage, heroWarning, notice, onDraftStateChange, overlaysBySection, sectionOptions, sections, workbenchState, workbenchTab]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -2777,6 +2779,20 @@ export function PdpEditor({
         {showSaveToast ? <div className={styles.saveToast}>저장되었습니다.</div> : null}
 
         <div className={styles.noticeRow} onClick={stopShellClick}>
+          {heroWarning ? (
+            <div className={styles.heroWarningBanner} role="alert">
+              <AlertCircle size={18} />
+              <span className={styles.heroWarningText}>{heroWarning}</span>
+              <button
+                className={styles.heroWarningDismiss}
+                onClick={() => setHeroWarning("")}
+                type="button"
+                aria-label="경고 닫기"
+              >
+                확인함
+              </button>
+            </div>
+          ) : null}
           <div className={styles.noticeBanner}>{notice}</div>
           {errorMessage ? (
             <div className={styles.errorBanner}>
