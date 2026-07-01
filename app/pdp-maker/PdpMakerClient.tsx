@@ -1828,7 +1828,7 @@ export function PdpMakerClient() {
               type="button"
               aria-label="대시보드로 이동"
             >
-              <span className={styles.brandMark}>HR</span>
+              <span className={styles.brandMark}>HM</span>
               <h1 className={styles.sidebarTitle}>{APP_TITLE}</h1>
             </button>
 
