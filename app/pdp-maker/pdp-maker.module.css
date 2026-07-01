@@ -6325,3 +6325,295 @@
     padding: 20px 12px 64px;
   }
 }
+
+/* ---- Waiting mini-games (10 animated games + shuffle) ---- */
+.waitingGameHeadSide {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.waitingGameShuffle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8f5ed;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.waitingGameShuffle:hover {
+  background: rgba(216, 182, 91, 0.22);
+  transform: translateY(-1px);
+}
+
+.waitingGameShuffle:active {
+  transform: translateY(0);
+}
+
+.waitingGameStage {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.waitingGameStageFill {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  cursor: crosshair;
+}
+
+.waitingGameStageCenter {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+.waitingGameHint {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(12, 22, 30, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f8f5ed;
+  font-size: 11.5px;
+  font-weight: 850;
+  white-space: nowrap;
+  z-index: 3;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
+.waitingGameHint strong {
+  color: #d8b65b;
+  font-weight: 950;
+}
+
+.waitingGameSwatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+}
+
+.waitingGameToast {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  padding: 8px 16px;
+  border-radius: 14px;
+  font-size: 18px;
+  font-weight: 950;
+  color: #06231f;
+  background: #4cb7aa;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  z-index: 6;
+  animation: waitingToastPop 0.72s ease-out forwards;
+}
+
+.waitingGameToast[data-tone="bad"] {
+  background: #c8474d;
+  color: #fff;
+}
+
+.waitingGameToast[data-tone="perfect"] {
+  background: linear-gradient(120deg, #d8b65b, #4cb7aa);
+  color: #0c161e;
+}
+
+@keyframes waitingToastPop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -40%) scale(0.7);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -52%) scale(1.06);
+  }
+
+  70% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -72%) scale(0.96);
+  }
+}
+
+.waitingGameHole {
+  position: absolute;
+  width: 52px;
+  height: 16px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.15) 70%, transparent);
+  z-index: 0;
+}
+
+.waitingGameTarget[data-variant="bubble"] {
+  background: radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.35) 30%, var(--waiting-game-target-color, #4cb7aa) 78%);
+  border-color: rgba(255, 255, 255, 0.7);
+  opacity: 0.92;
+  animation: waitingTargetPulse 1.6s ease-in-out infinite;
+}
+
+.waitingGameTarget[data-variant="bomb"],
+.waitingGameTarget[data-variant="mole"] {
+  animation: waitingChipPop 0.16s ease-out;
+}
+
+.waitingGameTarget[data-variant="aim"] {
+  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.95) 0 22%, transparent 26% 42%, var(--waiting-game-target-color, #4cb7aa) 46% 60%, transparent 64%);
+  border-color: rgba(255, 255, 255, 0.9);
+  color: #f8f5ed;
+  animation: waitingTargetPulse 0.9s ease-in-out infinite;
+}
+
+.waitingGameTarget[data-variant="solid"] {
+  border-color: rgba(255, 255, 255, 0.8);
+}
+
+@keyframes waitingChipPop {
+  0% {
+    transform: translate(-50%, -50%) scale(0.2);
+  }
+
+  70% {
+    transform: translate(-50%, -50%) scale(1.12);
+  }
+
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.waitingGameSignal {
+  width: 130px;
+  height: 130px;
+  border-radius: 28px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  font-weight: 950;
+  color: #0c161e;
+  cursor: pointer;
+  z-index: 2;
+  transition: transform 0.1s ease, background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.waitingGameSignal[data-state="wait"] {
+  background: linear-gradient(160deg, #8f979a, #5f6b73);
+  color: #f8f5ed;
+}
+
+.waitingGameSignal[data-state="stop"] {
+  background: linear-gradient(160deg, #e0636b, #c8474d);
+  color: #fff;
+  box-shadow: 0 0 0 8px rgba(200, 71, 77, 0.16);
+}
+
+.waitingGameSignal[data-state="go"] {
+  background: linear-gradient(160deg, #63d6c4, #2fae9c);
+  color: #06231f;
+  box-shadow: 0 0 0 10px rgba(76, 183, 170, 0.25), 0 0 30px rgba(76, 183, 170, 0.5);
+  transform: scale(1.04);
+}
+
+.waitingGameSignal:active {
+  transform: scale(0.97);
+}
+
+.waitingGameRingWrap {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.waitingGameRingCore {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle at 40% 35%, #f8f5ed, #d8b65b 75%);
+  box-shadow: 0 0 18px rgba(216, 182, 91, 0.6);
+}
+
+.waitingGameRing {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  border: 3px solid rgba(255, 255, 255, 0.5);
+}
+
+.waitingGameRing[data-good="true"] {
+  border-color: #4cb7aa;
+  box-shadow: 0 0 20px rgba(76, 183, 170, 0.55);
+}
+
+.waitingGameGrid {
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  grid-template-columns: repeat(2, 64px);
+  grid-template-rows: repeat(2, 64px);
+  gap: 12px;
+  z-index: 2;
+}
+
+.waitingGameGrid[data-phase="watch"] .waitingGamePad {
+  cursor: default;
+}
+
+.waitingGamePad {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--pad-color) 42%, #0c161e);
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+.waitingGamePad[data-lit="true"] {
+  background: var(--pad-color);
+  box-shadow: 0 0 22px 4px rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 22px 4px color-mix(in srgb, var(--pad-color) 70%, transparent);
+  transform: scale(1.06);
+}
+
+.waitingGamePad:active {
+  transform: scale(0.96);
+}
