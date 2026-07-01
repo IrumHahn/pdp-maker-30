@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 import { appendFile, mkdir, readFile, readdir } from "fs/promises";
 import path from "path";
+import { list, put } from "@vercel/blob";
 import {
   normalizePdpBugReportInput,
   type PdpBugReportAdminEvent,
@@ -13,6 +14,11 @@ const BUG_REPORT_DIR = path.join(process.cwd(), "output", "bug-reports");
 const ADMIN_EVENTS_FILE = "_admin-events.jsonl";
 const MAX_REPORTS_TO_READ = 200;
 const MAX_ADMIN_EVENTS_TO_READ = 1000;
+// When BLOB_READ_WRITE_TOKEN is present (Vercel), bug reports persist to Vercel Blob — durable and
+// serverless-safe. Locally (no token) they fall back to the JSONL files under output/ as before.
+const USE_BLOB_STORAGE = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+const BLOB_REPORT_PREFIX = "bug-reports/";
+const BLOB_ADMIN_EVENT_PREFIX = "bug-report-admin-events/";
 const MAX_ADMIN_MEMO_LENGTH = 1200;
 const STATUS_ORDER: PdpBugReportStatus[] = ["new", "reviewing", "resolved", "archived"];
 const STATUS_LABELS: Record<PdpBugReportStatus, string> = {
@@ -25,6 +31,71 @@ const NOTIFICATION_TIMEOUT_MS = 3500;
 const ADMIN_SESSION_MESSAGE = "hanirum-pdp-maker-bug-report-admin";
 
 export const PDP_BUG_REPORT_ADMIN_COOKIE = "pdp_bug_report_admin";
+
+// One blob per report (write-once, listed via prefix) on Vercel; JSONL append on local disk.
+async function persistReportRecord(record: PdpBugReportRecord, fileName: string) {
+  if (USE_BLOB_STORAGE) {
+    await put(`${BLOB_REPORT_PREFIX}${record.id}.json`, JSON.stringify(record), {
+      access: "public",
+      addRandomSuffix: true,
+      contentType: "application/json"
+    });
+    return;
+  }
+  await mkdir(BUG_REPORT_DIR, { recursive: true });
+  await appendFile(path.join(BUG_REPORT_DIR, fileName), `${JSON.stringify(record)}\n`, "utf8");
+}
+
+async function readReportRecords(): Promise<PdpBugReportRecord[]> {
+  if (USE_BLOB_STORAGE) {
+    const { blobs } = await list({ prefix: BLOB_REPORT_PREFIX, limit: MAX_REPORTS_TO_READ });
+    const recent = blobs
+      .sort((left, right) => new Date(right.uploadedAt).getTime() - new Date(left.uploadedAt).getTime())
+      .slice(0, MAX_REPORTS_TO_READ);
+    const records = await Promise.all(
+      recent.map(async (blob) => {
+        try {
+          const response = await fetch(blob.url, { cache: "no-store" });
+          return response.ok ? parseReport(await response.text(), blob.pathname) : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+    return records.filter((record): record is PdpBugReportRecord => Boolean(record));
+  }
+
+  let fileNames: string[];
+  try {
+    fileNames = await readdir(BUG_REPORT_DIR);
+  } catch {
+    return [];
+  }
+
+  const reports: PdpBugReportRecord[] = [];
+  const jsonlFiles = fileNames
+    .filter((fileName) => fileName.endsWith(".jsonl") && fileName !== ADMIN_EVENTS_FILE)
+    .sort((left, right) => right.localeCompare(left));
+
+  for (const fileName of jsonlFiles) {
+    const text = await readFile(path.join(BUG_REPORT_DIR, fileName), "utf8").catch(() => "");
+    const lines = text.split("\n").filter(Boolean).reverse();
+    for (const line of lines) {
+      const report = parseReport(line, `output/bug-reports/${fileName}`);
+      if (!report) {
+        continue;
+      }
+      reports.push(report);
+      if (reports.length >= MAX_REPORTS_TO_READ) {
+        break;
+      }
+    }
+    if (reports.length >= MAX_REPORTS_TO_READ) {
+      break;
+    }
+  }
+  return reports;
+}
 
 export async function createPdpBugReport(raw: unknown, request?: Request) {
   const normalized = normalizePdpBugReportInput(raw);
@@ -51,13 +122,12 @@ export async function createPdpBugReport(raw: unknown, request?: Request) {
   record.notifications = await sendPdpBugReportNotifications(record);
 
   try {
-    await mkdir(BUG_REPORT_DIR, { recursive: true });
-    await appendFile(path.join(BUG_REPORT_DIR, fileName), `${JSON.stringify(record)}\n`, "utf8");
+    await persistReportRecord(record, fileName);
   } catch (error) {
-    // Serverless filesystems (e.g. Vercel) are read-only outside /tmp, so persisting the
-    // report file can throw. Notifications already fired above, so keep the submission
-    // successful instead of surfacing a 500 (and triggering duplicate notifications on retry).
-    console.warn("[pdp-bug-report] failed to persist report file", error);
+    // Persistence is best-effort: notifications already fired above, so keep the submission
+    // successful instead of surfacing a 500 (which would also trigger duplicate notifications
+    // on retry). Blob/write failures are logged for follow-up.
+    console.warn("[pdp-bug-report] failed to persist report", error);
   }
 
   return {
@@ -70,37 +140,7 @@ export async function listPdpBugReports(options?: { status?: string; limit?: num
   const limit = Math.max(1, Math.min(options?.limit ?? MAX_REPORTS_TO_READ, MAX_REPORTS_TO_READ));
   const status = normalizeStatusFilter(options?.status);
 
-  let fileNames: string[];
-  try {
-    fileNames = await readdir(BUG_REPORT_DIR);
-  } catch {
-    return [];
-  }
-
-  const reports: PdpBugReportRecord[] = [];
-  const jsonlFiles = fileNames
-    .filter((fileName) => fileName.endsWith(".jsonl") && fileName !== ADMIN_EVENTS_FILE)
-    .sort((left, right) => right.localeCompare(left));
-
-  for (const fileName of jsonlFiles) {
-    const text = await readFile(path.join(BUG_REPORT_DIR, fileName), "utf8").catch(() => "");
-    const lines = text.split("\n").filter(Boolean).reverse();
-
-    for (const line of lines) {
-      const report = parseReport(line, `output/bug-reports/${fileName}`);
-      if (!report) {
-        continue;
-      }
-      reports.push(report);
-      if (reports.length >= MAX_REPORTS_TO_READ) {
-        break;
-      }
-    }
-
-    if (reports.length >= MAX_REPORTS_TO_READ) {
-      break;
-    }
-  }
+  const reports = await readReportRecords();
 
   const adminEvents = await readAdminEvents();
   const mergedReports = applyAdminEvents(reports, adminEvents).sort(sortReports);
@@ -278,24 +318,50 @@ async function getPdpBugReportById(reportId: string) {
 
 async function appendAdminEvent(event: PdpBugReportAdminEvent) {
   try {
+    if (USE_BLOB_STORAGE) {
+      await put(`${BLOB_ADMIN_EVENT_PREFIX}${randomUUID()}.json`, JSON.stringify(event), {
+        access: "public",
+        addRandomSuffix: true,
+        contentType: "application/json"
+      });
+      return;
+    }
     await mkdir(BUG_REPORT_DIR, { recursive: true });
     await appendFile(path.join(BUG_REPORT_DIR, ADMIN_EVENTS_FILE), `${JSON.stringify(event)}\n`, "utf8");
   } catch (error) {
-    // Best-effort: read-only serverless filesystem should not break admin actions.
+    // Best-effort: a storage failure should not break admin actions.
     console.warn("[pdp-bug-report] failed to persist admin event", error);
   }
 }
 
 async function readAdminEvents() {
-  const text = await readFile(path.join(BUG_REPORT_DIR, ADMIN_EVENTS_FILE), "utf8").catch(() => "");
-  const events = text
-    .split("\n")
-    .filter(Boolean)
-    .map(parseAdminEvent)
-    .filter((event): event is PdpBugReportAdminEvent => Boolean(event))
-    .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+  let events: PdpBugReportAdminEvent[];
 
-  return events.slice(-MAX_ADMIN_EVENTS_TO_READ);
+  if (USE_BLOB_STORAGE) {
+    const { blobs } = await list({ prefix: BLOB_ADMIN_EVENT_PREFIX, limit: MAX_ADMIN_EVENTS_TO_READ });
+    const parsed = await Promise.all(
+      blobs.map(async (blob) => {
+        try {
+          const response = await fetch(blob.url, { cache: "no-store" });
+          return response.ok ? parseAdminEvent(await response.text()) : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+    events = parsed.filter((event): event is PdpBugReportAdminEvent => Boolean(event));
+  } else {
+    const text = await readFile(path.join(BUG_REPORT_DIR, ADMIN_EVENTS_FILE), "utf8").catch(() => "");
+    events = text
+      .split("\n")
+      .filter(Boolean)
+      .map(parseAdminEvent)
+      .filter((event): event is PdpBugReportAdminEvent => Boolean(event));
+  }
+
+  return events
+    .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))
+    .slice(-MAX_ADMIN_EVENTS_TO_READ);
 }
 
 function applyAdminEvents(reports: PdpBugReportRecord[], events: PdpBugReportAdminEvent[]) {
