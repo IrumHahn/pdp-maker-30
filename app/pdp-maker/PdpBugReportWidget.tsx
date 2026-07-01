@@ -274,8 +274,6 @@ export function PdpBugReportWidget({ context }: PdpBugReportWidgetProps) {
               {isSubmitting ? <Loader2 className={styles.spinIcon} size={16} /> : <Send size={16} />}
               신고 보내기
             </button>
-
-            <p className={styles.bugReportPrivacyNote}>이미지 원본과 API 키는 신고 내용에 저장하지 않습니다. 접수 즉시 운영자에게 Discord와 이메일로 알림이 갑니다.</p>
           </form>
         </section>
       ) : null}

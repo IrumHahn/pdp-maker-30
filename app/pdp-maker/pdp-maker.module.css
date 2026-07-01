@@ -5815,13 +5815,6 @@
   opacity: 0.58;
 }
 
-.bugReportPrivacyNote {
-  margin: -2px 0 0;
-  color: #6b7280;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
 .bugReportHoneypot {
   position: absolute;
   left: -9999px;
