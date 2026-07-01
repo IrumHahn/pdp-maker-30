@@ -39,8 +39,15 @@ export async function POST(request: Request) {
 
   const logDir = path.join(process.cwd(), "output", "user-logs");
   const fileName = `${receivedAt.slice(0, 10)}.jsonl`;
-  await mkdir(logDir, { recursive: true });
-  await appendFile(path.join(logDir, fileName), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  try {
+    await mkdir(logDir, { recursive: true });
+    await appendFile(path.join(logDir, fileName), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  } catch (error) {
+    // Read-only serverless filesystem (e.g. Vercel): usage logging is best-effort
+    // analytics, so swallow the write failure instead of returning a 500.
+    console.warn("[pdp-usage-log] failed to persist usage log", error);
+    return Response.json({ ok: true, count: events.length, persisted: false });
+  }
 
   return Response.json({
     ok: true,

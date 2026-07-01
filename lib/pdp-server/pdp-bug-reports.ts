@@ -50,8 +50,15 @@ export async function createPdpBugReport(raw: unknown, request?: Request) {
 
   record.notifications = await sendPdpBugReportNotifications(record);
 
-  await mkdir(BUG_REPORT_DIR, { recursive: true });
-  await appendFile(path.join(BUG_REPORT_DIR, fileName), `${JSON.stringify(record)}\n`, "utf8");
+  try {
+    await mkdir(BUG_REPORT_DIR, { recursive: true });
+    await appendFile(path.join(BUG_REPORT_DIR, fileName), `${JSON.stringify(record)}\n`, "utf8");
+  } catch (error) {
+    // Serverless filesystems (e.g. Vercel) are read-only outside /tmp, so persisting the
+    // report file can throw. Notifications already fired above, so keep the submission
+    // successful instead of surfacing a 500 (and triggering duplicate notifications on retry).
+    console.warn("[pdp-bug-report] failed to persist report file", error);
+  }
 
   return {
     ok: true as const,
@@ -270,8 +277,13 @@ async function getPdpBugReportById(reportId: string) {
 }
 
 async function appendAdminEvent(event: PdpBugReportAdminEvent) {
-  await mkdir(BUG_REPORT_DIR, { recursive: true });
-  await appendFile(path.join(BUG_REPORT_DIR, ADMIN_EVENTS_FILE), `${JSON.stringify(event)}\n`, "utf8");
+  try {
+    await mkdir(BUG_REPORT_DIR, { recursive: true });
+    await appendFile(path.join(BUG_REPORT_DIR, ADMIN_EVENTS_FILE), `${JSON.stringify(event)}\n`, "utf8");
+  } catch (error) {
+    // Best-effort: read-only serverless filesystem should not break admin actions.
+    console.warn("[pdp-bug-report] failed to persist admin event", error);
+  }
 }
 
 async function readAdminEvents() {

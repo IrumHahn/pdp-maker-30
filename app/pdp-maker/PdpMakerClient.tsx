@@ -2960,7 +2960,10 @@ async function preparePdfSourceMaterial(file: File): Promise<PdpSourceMaterialDr
 
 async function extractPdfSourceData(file: File) {
   const pdfjs = await import("pdfjs-dist");
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).toString();
+  // Self-hosted worker (public/pdf.worker.min.mjs). The `new URL(..., import.meta.url)` form forces
+  // webpack to bundle the worker and breaks `next build`; a static path avoids it. Re-copy from
+  // node_modules/pdfjs-dist/build/pdf.worker.min.mjs whenever pdfjs-dist is upgraded.
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
   const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
   const textPages: string[] = [];
   const renderedPages: HTMLCanvasElement[] = [];
@@ -3637,7 +3640,10 @@ async function extractKnowledgeText(file: File) {
 
 async function extractPdfText(file: File) {
   const pdfjs = await import("pdfjs-dist");
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).toString();
+  // Self-hosted worker (public/pdf.worker.min.mjs). The `new URL(..., import.meta.url)` form forces
+  // webpack to bundle the worker and breaks `next build`; a static path avoids it. Re-copy from
+  // node_modules/pdfjs-dist/build/pdf.worker.min.mjs whenever pdfjs-dist is upgraded.
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
   const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
   const pageCount = Math.min(pdf.numPages, 80);
   const pages: string[] = [];
