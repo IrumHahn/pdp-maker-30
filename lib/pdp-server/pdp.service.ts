@@ -1319,7 +1319,9 @@ export function toPdpErrorResponse(error: unknown) {
     return {
       ok: false as const,
       code: "GEMINI_QUOTA_EXCEEDED" as const,
-      message: "AI 사용량이 초과되었습니다. 잠시 후 다시 시도하거나 quota 상태를 확인해 주세요.",
+      message: isGeminiFreeTierBlockedError(message)
+        ? GEMINI_FREE_TIER_BLOCKED_MESSAGE
+        : "AI 사용량이 초과되었습니다. 잠시 후 다시 시도하거나 quota 상태를 확인해 주세요.",
       detail
     };
   }
@@ -3431,7 +3433,11 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = 2, delay
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
-    if (retries > 0 && (isQuotaError(message) || isJsonError(message))) {
+    if (
+      retries > 0 &&
+      !isGeminiFreeTierBlockedError(message) &&
+      (isQuotaError(message) || isJsonError(message))
+    ) {
       await wait(delay);
       return retryOperation(operation, retries - 1, delay * 2);
     }
@@ -3443,7 +3449,9 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = 2, delay
     if (isQuotaError(message)) {
       throw new PdpServiceError(
         "GEMINI_QUOTA_EXCEEDED",
-        "AI 사용량이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+        isGeminiFreeTierBlockedError(message)
+          ? GEMINI_FREE_TIER_BLOCKED_MESSAGE
+          : "AI 사용량이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
         message
       );
     }
@@ -3463,6 +3471,16 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = 2, delay
 function isQuotaError(message: string) {
   const lowered = message.toLowerCase();
   return lowered.includes("429") || lowered.includes("quota") || lowered.includes("resource_exhausted");
+}
+
+// Google returns 429 with `free_tier` metrics and `limit: 0` when the key has no paid tier
+// for the requested model — retrying never helps; the user must enable billing.
+const GEMINI_FREE_TIER_BLOCKED_MESSAGE =
+  "사용 중인 Gemini API 키가 무료 등급(free tier)이라 이미지 생성 모델을 사용할 수 없습니다. Google AI Studio(aistudio.google.com)의 결제 설정(Billing)에서 유료 등급으로 전환한 뒤 다시 시도해 주세요.";
+
+function isGeminiFreeTierBlockedError(message: string) {
+  const lowered = message.toLowerCase();
+  return lowered.includes("free_tier") && lowered.includes("limit: 0");
 }
 
 function isInvalidApiKeyError(message: string) {
