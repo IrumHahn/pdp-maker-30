@@ -27,7 +27,11 @@
 }
 
 .workspaceFrame {
-  width: 100%;
+  /* 시안 A(1단계 핫픽스): 초광폭에서 대시보드/설정 본문이 풀폭으로 늘어나 밀도가
+     낮아 보이던 문제 해결. 중앙정렬 + 상한으로 읽기 좋은 폭 유지.
+     에디터(editorShell 1480px)는 별도 early-return이라 무관. */
+  width: min(1120px, 100%);
+  margin: 0 auto;
   min-width: 0;
 }
 
