@@ -6,6 +6,7 @@ import type {
   ImageGenOptions,
   PdpAiProvider,
   PdpAnalysisImageMetadata,
+  PdpAnalysisStrip,
   PdpCopyLanguage,
   PdpCustomerReviewAnalysis,
   PdpOutputMode,
@@ -93,6 +94,10 @@ export interface PreparedImageDraft {
   generationBase64?: string;
   generationMimeType?: string;
   generationPreviewUrl?: string;
+  // Long-detail-page strips are persisted so a draft restored later re-analyzes the WHOLE page.
+  // Without them the stored base64 is only the topmost band, and re-analysis would silently
+  // treat that single banner strip as the entire detail page.
+  analysisStrips?: PdpAnalysisStrip[];
   analysisMetadata?: PdpAnalysisImageMetadata;
 }
 
@@ -359,6 +364,7 @@ function normalizePreparedImage(image: PreparedImageDraft | null | undefined) {
   }
 
   const previewUrl = image.previewUrl || `data:${image.mimeType};base64,${image.base64}`;
+  const analysisStrips = normalizeAnalysisStrips(image.analysisStrips);
 
   return {
     base64: image.base64,
@@ -368,12 +374,55 @@ function normalizePreparedImage(image: PreparedImageDraft | null | undefined) {
     generationBase64: image.generationBase64,
     generationMimeType: image.generationMimeType,
     generationPreviewUrl: image.generationPreviewUrl,
-    analysisMetadata: normalizeAnalysisMetadata(image.analysisMetadata)
+    analysisStrips,
+    analysisMetadata: normalizeAnalysisMetadata(image.analysisMetadata, analysisStrips)
   };
 }
 
-function normalizeAnalysisMetadata(metadata: PdpAnalysisImageMetadata | null | undefined) {
-  if (!metadata || (metadata.mode !== "original" && metadata.mode !== "standard-resize" && metadata.mode !== "long-detail-sampling")) {
+function normalizeAnalysisStrips(strips: PdpAnalysisStrip[] | null | undefined): PdpAnalysisStrip[] | undefined {
+  if (!Array.isArray(strips) || strips.length === 0) {
+    return undefined;
+  }
+
+  const normalized = strips
+    .filter(
+      (strip): strip is PdpAnalysisStrip =>
+        Boolean(strip) &&
+        typeof strip.base64 === "string" &&
+        strip.base64.length > 0 &&
+        typeof strip.mimeType === "string" &&
+        Number.isFinite(strip.yStartRatio) &&
+        Number.isFinite(strip.yEndRatio)
+    )
+    .map((strip) => ({
+      base64: strip.base64,
+      mimeType: strip.mimeType,
+      yStartRatio: strip.yStartRatio,
+      yEndRatio: strip.yEndRatio
+    }));
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeAnalysisMetadata(
+  metadata: PdpAnalysisImageMetadata | null | undefined,
+  analysisStrips?: PdpAnalysisStrip[]
+) {
+  if (
+    !metadata ||
+    (metadata.mode !== "original" &&
+      metadata.mode !== "standard-resize" &&
+      metadata.mode !== "long-detail-sampling" &&
+      metadata.mode !== "long-detail-strips")
+  ) {
+    return undefined;
+  }
+
+  // Strip metadata without the strips themselves (legacy drafts saved before strips were
+  // persisted) would make the analyze prompt claim "N strips attached, top to bottom" while
+  // only the topmost band is actually sent. Drop the metadata so the server treats the image
+  // as a plain resized copy instead of lying to the model.
+  if (metadata.mode === "long-detail-strips" && (!analysisStrips || analysisStrips.length === 0)) {
     return undefined;
   }
 
@@ -386,6 +435,10 @@ function normalizeAnalysisMetadata(metadata: PdpAnalysisImageMetadata | null | u
     originalBytes: Number(metadata.originalBytes) || 0,
     optimizedBytes: Number(metadata.optimizedBytes) || 0,
     sampleCount: typeof metadata.sampleCount === "number" ? metadata.sampleCount : undefined,
+    stripCount: typeof metadata.stripCount === "number" ? metadata.stripCount : undefined,
+    stripWidth: typeof metadata.stripWidth === "number" ? metadata.stripWidth : undefined,
+    reductionFactor: typeof metadata.reductionFactor === "number" ? metadata.reductionFactor : undefined,
+    actualReduction: typeof metadata.actualReduction === "number" ? metadata.actualReduction : undefined,
     generationReferenceWidth: typeof metadata.generationReferenceWidth === "number" ? metadata.generationReferenceWidth : undefined,
     generationReferenceHeight: typeof metadata.generationReferenceHeight === "number" ? metadata.generationReferenceHeight : undefined
   };

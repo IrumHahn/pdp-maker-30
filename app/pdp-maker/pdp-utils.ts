@@ -145,6 +145,11 @@ const LONG_DETAIL_MIN_RATIO = 4.5;
 const UPLOAD_MAX_BYTES = 4_000_000;
 const UPLOAD_MAX_EDGE = 4096;
 const UPLOAD_MIN_QUALITY = 0.5;
+// Long detail pages must NOT be squeezed by the generic longest-edge cap: their longest edge is
+// the height, so a 4096 cap crushes an 860×20,000px page to 176px wide before the server ever
+// slices strips — every glyph the strips exist to preserve is already gone. Height is capped
+// far more gently, only to keep the canvas within cross-browser raster limits.
+const UPLOAD_LONG_PAGE_MAX_CANVAS_HEIGHT = 24_000;
 
 export async function prepareImageFile(file: File, options?: { allowLongPageSampling?: boolean }) {
   const headerDimensions = await readImageDimensions(file).catch(() => null);
@@ -218,9 +223,10 @@ export async function reoptimizePreparedImagePayload(
 }
 
 /**
- * Reads the legible long-detail strips off a freshly-prepared image (Approach A v2).
- * Strips are transient (only present after a server optimize this session) and are NOT
- * persisted to drafts, so this uses structural access rather than the PreparedImageDraft type.
+ * Reads the legible long-detail strips off a prepared image (Approach A v2). Strips come from
+ * a server optimize this session OR from a restored draft (pdp-drafts.ts persists them so a
+ * restored long page re-analyzes whole, not just its topmost band). Structural access keeps
+ * this working for both the live payload shape and PreparedImageDraft.
  */
 export function getPreparedImageStrips(image: unknown): PdpAnalysisStrip[] | undefined {
   const strips = (image as { analysisStrips?: PdpAnalysisStrip[] } | null | undefined)?.analysisStrips;
@@ -230,8 +236,10 @@ export function getPreparedImageStrips(image: unknown): PdpAnalysisStrip[] | und
 // Re-encode an oversized file down to a safe byte budget before uploading it to a serverless
 // function. Long detail pages are optimized server-side (see optimizeImageFileOnServer), which
 // means the ORIGINAL file is uploaded — so a >4.5MB original 413s before sharp ever runs.
-// Preserve aspect ratio, cap the longest edge for cross-browser canvas safety, and trim quality
-// (cheap, keeps resolution) then dimensions until the JPEG fits the budget.
+// Preserve aspect ratio and trim quality (cheap, keeps resolution) then dimensions until the
+// JPEG fits the budget. Standard images cap the longest edge at 4096 for canvas safety; long
+// detail pages keep their width (see UPLOAD_LONG_PAGE_MAX_CANVAS_HEIGHT) because the server's
+// strip slicer needs the original pixel width to produce legible strips.
 async function shrinkFileForUpload(file: File): Promise<File> {
   if (file.size <= UPLOAD_MAX_BYTES) {
     return file;
@@ -241,7 +249,14 @@ async function shrinkFileForUpload(file: File): Promise<File> {
   const sourceWidth = image.naturalWidth || image.width;
   const sourceHeight = image.naturalHeight || image.height;
 
-  let scale = Math.min(1, UPLOAD_MAX_EDGE / Math.max(sourceWidth, sourceHeight, 1));
+  // Long pages keep full resolution and spend JPEG quality first; dimensions shrink uniformly
+  // only as a last resort. Everything else keeps the legacy longest-edge cap. If the browser
+  // cannot rasterize the tall canvas (canvasToJpegPayload throws on an empty result), fall back
+  // to the legacy cap once instead of failing the upload.
+  const legacyScale = Math.min(1, UPLOAD_MAX_EDGE / Math.max(sourceWidth, sourceHeight, 1));
+  let scale = isLongDetailPage(sourceWidth, sourceHeight)
+    ? Math.min(1, UPLOAD_LONG_PAGE_MAX_CANVAS_HEIGHT / Math.max(sourceHeight, 1))
+    : legacyScale;
   let quality = 0.85;
   let lastPayload: ReturnType<typeof canvasToJpegPayload> | null = null;
 
@@ -256,7 +271,15 @@ async function shrinkFileForUpload(file: File): Promise<File> {
       throw new Error("이미지 캔버스를 초기화하지 못했습니다.");
     }
     context.drawImage(image, 0, 0, sourceWidth, sourceHeight, 0, 0, targetWidth, targetHeight);
-    lastPayload = canvasToJpegPayload(canvas, quality);
+    try {
+      lastPayload = canvasToJpegPayload(canvas, quality);
+    } catch (error) {
+      if (scale > legacyScale) {
+        scale = legacyScale;
+        continue;
+      }
+      throw error;
+    }
 
     if (lastPayload.bytes <= UPLOAD_MAX_BYTES) {
       break;
