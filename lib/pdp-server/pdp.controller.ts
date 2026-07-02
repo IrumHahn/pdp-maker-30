@@ -1,4 +1,10 @@
-import type { PdpAnalyzeCustomerReviewsRequest, PdpAnalyzeRequest, PdpExpandRequest, PdpGenerateImageRequest } from "../shared";
+import type {
+  PdpAnalyzeCustomerReviewsRequest,
+  PdpAnalyzeRequest,
+  PdpExpandRequest,
+  PdpGenerateImageRequest,
+  PdpTranscribeStripsRequest
+} from "../shared";
 import { PdpService, PdpServiceError, toPdpErrorResponse } from "./pdp.service";
 
 export class PdpController {
@@ -34,6 +40,18 @@ export class PdpController {
       return {
         ok: true as const,
         result
+      };
+    } catch (error) {
+      return toPdpErrorResponse(error);
+    }
+  }
+
+  async transcribeStrips(body: PdpTranscribeStripsRequest, geminiApiKeyOverride?: string, openAiApiKeyOverride?: string) {
+    try {
+      const result = await this.pdpService.transcribeStrips(body, geminiApiKeyOverride, openAiApiKeyOverride);
+      return {
+        ok: true as const,
+        ...result
       };
     } catch (error) {
       return toPdpErrorResponse(error);

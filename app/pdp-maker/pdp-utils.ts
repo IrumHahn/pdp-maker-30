@@ -1,4 +1,10 @@
-import type { AspectRatio, PdpAnalysisImageMetadata, PdpAnalysisStrip, PdpValidateApiKeyResponse } from "@runacademy/shared";
+import type {
+  AspectRatio,
+  PdpAnalysisImageMetadata,
+  PdpAnalysisStrip,
+  PdpProductCutRegion,
+  PdpValidateApiKeyResponse
+} from "@runacademy/shared";
 import { ANALYSIS_IMAGE_MAX_BYTES, GENERATION_IMAGE_MAX_BYTES } from "@runacademy/shared";
 import { resolveGeminiApiKeyHeaderValue, resolveOpenAiApiKeyHeaderValue } from "./pdp-settings";
 
@@ -231,6 +237,82 @@ export async function reoptimizePreparedImagePayload(
 export function getPreparedImageStrips(image: unknown): PdpAnalysisStrip[] | undefined {
   const strips = (image as { analysisStrips?: PdpAnalysisStrip[] } | null | undefined)?.analysisStrips;
   return Array.isArray(strips) && strips.length > 0 ? strips : undefined;
+}
+
+const PRODUCT_CUT_CROP_MAX_DIMENSION = 2048;
+const PRODUCT_CUT_CROP_QUALITY = 0.9;
+
+/**
+ * Crop productCutRegion out of the user's ORIGINAL upload at full resolution. The analysis
+ * pipeline only ever sees downscaled strips, so generation references cropped from them are
+ * blurry; ratios are scale-invariant, which lets us cut the same region from original pixels.
+ * Returns null when the region is unusable or the browser cannot decode/rasterize the file.
+ */
+export async function cropProductCutFromOriginalFile(
+  file: File,
+  region: PdpProductCutRegion
+): Promise<{ base64: string; mimeType: string; previewUrl: string } | null> {
+  if (!(region.yEndRatio > region.yStartRatio)) {
+    return null;
+  }
+
+  try {
+    const image = await loadImage(await readFileAsDataUrl(file));
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+    if (!sourceWidth || !sourceHeight) {
+      return null;
+    }
+
+    const top = Math.max(0, Math.floor(region.yStartRatio * sourceHeight));
+    const bottom = Math.min(sourceHeight, Math.ceil(region.yEndRatio * sourceHeight));
+    const hasX = region.xStartRatio != null && region.xEndRatio != null && region.xEndRatio > region.xStartRatio;
+    const left = hasX ? Math.max(0, Math.floor((region.xStartRatio as number) * sourceWidth)) : 0;
+    const right = hasX ? Math.min(sourceWidth, Math.ceil((region.xEndRatio as number) * sourceWidth)) : sourceWidth;
+    const cropWidth = right - left;
+    const cropHeight = bottom - top;
+    if (cropWidth < 32 || cropHeight < 32) {
+      return null;
+    }
+
+    // Byte-capped like every other generation copy (GENERATION_IMAGE_MAX_BYTES): an uncapped
+    // 2048px photo-dense crop can top 2MB and push a bundled /pdp/images body toward Vercel's
+    // 4.5MB limit — and a draft would persist that oversized reference. Trim quality first
+    // (keeps resolution), then dimensions.
+    let scale = Math.min(1, PRODUCT_CUT_CROP_MAX_DIMENSION / Math.max(cropWidth, cropHeight));
+    let quality = PRODUCT_CUT_CROP_QUALITY;
+    let payload: ReturnType<typeof canvasToJpegPayload> | null = null;
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const targetWidth = Math.max(1, Math.round(cropWidth * scale));
+      const targetHeight = Math.max(1, Math.round(cropHeight * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        return null;
+      }
+      context.drawImage(image, left, top, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight);
+      payload = canvasToJpegPayload(canvas, quality);
+      if (payload.bytes <= GENERATION_IMAGE_MAX_BYTES) {
+        break;
+      }
+      if (quality > 0.7) {
+        quality -= 0.1;
+      } else {
+        scale *= 0.85;
+      }
+    }
+
+    if (!payload) {
+      return null;
+    }
+    return { base64: payload.base64, mimeType: "image/jpeg", previewUrl: payload.previewUrl };
+  } catch {
+    // Any decode/raster failure just means we keep the server-side strip crop.
+    return null;
+  }
 }
 
 // Re-encode an oversized file down to a safe byte budget before uploading it to a serverless

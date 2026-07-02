@@ -9,6 +9,7 @@ import type {
   AspectRatio,
   GeneratedResult,
   PdpAiProvider,
+  PdpAnalysisStrip,
   PdpAnalyzeCustomerReviewsResponse,
   PdpAnalyzeResponse,
   PdpCustomerReviewAnalysis,
@@ -16,6 +17,7 @@ import type {
   PdpGenerateImageResponse,
   PdpOutputMode,
   PdpSourceMaterial,
+  PdpTranscribeStripsResponse,
   ReferenceModelUsage
 } from "@runacademy/shared";
 import type { PdpAppState, PdpDraftSummary, PdpEditorDraftState, PdpSourceMaterialDraft, PreparedImageDraft } from "./pdp-drafts";
@@ -26,6 +28,7 @@ import { PdpSettingsSheet } from "./PdpSettingsSheet";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../components/ui/sheet";
 import styles from "./pdp-maker.module.css";
 import { flushPdpUsageLogs, installPdpUsageLogFlushHandlers, logPdpUsage } from "./pdp-usage-log";
+import { PDP_APP_VERSION } from "./pdp-version";
 import {
   loadPdpClientSettings,
   resolveGeminiApiKeyHeaderValue,
@@ -38,6 +41,7 @@ import {
   TONE_OPTIONS,
   apiJson,
   GENERATION_API_TIMEOUT_MS,
+  cropProductCutFromOriginalFile,
   getPreparedImageStrips,
   needsPreparedImageReoptimization,
   prepareImageFile,
@@ -89,6 +93,87 @@ const MAX_SOURCE_MATERIAL_TEXT_CHARS_PER_FILE = 12000;
 const MAX_PDF_TEXT_PAGES = 80;
 const MAX_PDF_ANALYSIS_PAGES = 3;
 const PDF_ANALYSIS_RENDER_WIDTH = 900;
+// Pass-1 transcription (2-pass long-page analysis): strips per vision call. 6 keeps a batch of
+// 344px-wide strips inside one model call's attention span; the byte cap guards wide pages
+// (strips up to 1536px can reach ~500KB each) against Vercel's ~4.5MB request-body limit.
+const TRANSCRIBE_STRIPS_PER_BATCH = 6;
+const TRANSCRIBE_BATCH_MAX_BASE64_CHARS = 2_600_000;
+const TRANSCRIBE_MAX_TRANSCRIPT_CHARS = 60_000;
+// Errors that retrying a transcription batch cannot fix — abort pass 1 immediately.
+const TRANSCRIBE_FATAL_ERROR_CODES = new Set([
+  "GEMINI_API_KEY_MISSING",
+  "GEMINI_API_KEY_INVALID",
+  "GEMINI_MODEL_ACCESS_DENIED",
+  "GEMINI_QUOTA_EXCEEDED",
+  "OPENAI_API_KEY_MISSING",
+  "OPENAI_API_KEY_INVALID",
+  "OPENAI_MODEL_ACCESS_DENIED",
+  "OPENAI_QUOTA_EXCEEDED"
+]);
+
+/**
+ * Cache key binding a transcript to the exact strips it was read from. JPEG base64 PREFIXES
+ * are useless as identity: the first ~80 chars encode only the encoder's quality tables, and
+ * every strip comes from the same server pipeline (verified with this project's sharp — two
+ * unrelated images share the exact same first 80 chars). The TAIL is image data and differs
+ * per image, so the key uses lengths plus tail slices of the first/last strips. A weak key
+ * here silently reuses another product's transcript — the sunscreen-contamination class.
+ */
+function buildLongPageStripsCacheKey(strips: PdpAnalysisStrip[]) {
+  const first = strips[0]?.base64 ?? "";
+  const last = strips[strips.length - 1]?.base64 ?? "";
+  const totalChars = strips.reduce((sum, strip) => sum + strip.base64.length, 0);
+  return [strips.length, totalChars, first.length, first.slice(-80), last.length, last.slice(-80)].join(":");
+}
+
+type TranscriptionPage = { label: string; strips: PdpAnalysisStrip[] };
+
+// Total long pages transcribed per run (primary + supporting). Each page costs its own batch
+// calls, so this bounds worst-case pass-1 time/cost. 5 covers the "한 상세페이지를 여러 장으로
+// 나눠 캡처" workflow (실측: 3~4장 분할이 일반적); overflow stays visible in the completion
+// notice, never silent.
+const MAX_TRANSCRIBE_PAGES = 5;
+
+/**
+ * Every long page in the upload set that pass-1 should transcribe, primary first. Used both at
+ * analyze time and when seeding the transcript cache from a restored draft — MUST stay the
+ * single source of that selection so the cache keys line up.
+ */
+function selectTranscriptionPages(primaryImage: unknown, materials: PdpSourceMaterialDraft[]): TranscriptionPage[] {
+  const pages: TranscriptionPage[] = [];
+  const primaryStrips = getPreparedImageStrips(primaryImage);
+  if (primaryStrips?.length) {
+    pages.push({
+      label: (primaryImage as { fileName?: string } | null | undefined)?.fileName || "대표 상세페이지",
+      strips: primaryStrips
+    });
+  }
+  for (const material of materials) {
+    if (pages.length >= MAX_TRANSCRIBE_PAGES) {
+      break;
+    }
+    if (material.role === "primary" || material.kind !== "image") {
+      continue;
+    }
+    const strips = material.preparedImage?.analysisStrips;
+    if (strips?.length) {
+      pages.push({ label: material.fileName || "보조 상세페이지", strips });
+    }
+  }
+  return pages;
+}
+
+function buildTranscriptionCacheKey(pages: TranscriptionPage[]) {
+  return pages.map((page) => buildLongPageStripsCacheKey(page.strips)).join("|");
+}
+// Client-side gate mirroring the server's PRODUCT_CUT_MIN_CONFIDENCE.
+const PRODUCT_CUT_RECROP_MIN_CONFIDENCE = 0.5;
+// Higher bar than the crop gate: using a whole attached image as the appearance reference is
+// all-or-nothing, so a wrong pick (e.g. a sibling product) is worse than falling back.
+const REFERENCE_PRODUCT_IMAGE_MIN_CONFIDENCE = 0.7;
+// Mirrors the server's MAX_ANALYZE_SOURCE_IMAGES: only the first 5 supporting image payloads
+// reach the model's vision input — a pick beyond that is a reference the model never saw.
+const MAX_ANALYZE_SOURCE_IMAGES_SENT = 5;
 const OUTPUT_MODE_OPTIONS: Array<{
   value: PdpOutputMode;
   label: string;
@@ -171,6 +256,11 @@ export function PdpMakerClient() {
   const [modelImage, setModelImage] = useState<PreparedImage | null>(null);
   const [modelImageUsage, setModelImageUsage] = useState<ReferenceModelUsage | null>(null);
   const [result, setResult] = useState<GeneratedResult | null>(null);
+  // Pass-1 transcript of the uploaded long detail page; feeds analyze AND section expansion.
+  const [longPageTranscript, setLongPageTranscript] = useState<string | null>(null);
+  // COMPLETE transcripts keyed to their strips — a retried/regenerated analysis of the same
+  // image reuses the paid pass-1 result instead of re-billing every batch.
+  const longPageTranscriptCacheRef = useRef<{ key: string; transcript: string; batchCount: number } | null>(null);
   const [additionalInfo, setAdditionalInfo] = useState("");
   const [customerReviewSource, setCustomerReviewSource] = useState<PdpCustomerReviewSource | null>(null);
   const [customerReviewAnalysis, setCustomerReviewAnalysis] = useState<PdpCustomerReviewAnalysis | null>(null);
@@ -222,12 +312,17 @@ export function PdpMakerClient() {
   const modelImageDisplayName = modelImage ? formatCompactFileName(modelImage.fileName) : "";
   const visibleSourceMaterials = useMemo(() => getVisibleSourceMaterials(sourceMaterials, preparedImage), [preparedImage, sourceMaterials]);
   const sourceMaterialDropzoneLabel = visibleSourceMaterials.length
-    ? `${visibleSourceMaterials.length}개 자료 등록 · 대표: ${preparedImageDisplayName}`
+    ? `${visibleSourceMaterials.length}개 자료 등록 · ${summarizeSourceMaterialsForUi(visibleSourceMaterials)}`
     : "";
   const sourceMaterialSummaryLabel = visibleSourceMaterials.length
     ? summarizeSourceMaterialsForUi(visibleSourceMaterials)
     : "이미지/PDF 미등록";
+  const sourceMaterialTypeLabels = useMemo(
+    () => buildSourceMaterialTypeLabels(visibleSourceMaterials),
+    [visibleSourceMaterials]
+  );
   const uploadContextGuidance = useMemo(() => buildUploadContextGuidance(visibleSourceMaterials, additionalInfo), [additionalInfo, visibleSourceMaterials]);
+  const showProductImageGuidance = useMemo(() => needsProductImageGuidance(visibleSourceMaterials), [visibleSourceMaterials]);
   const knowledgeText = useMemo(() => buildKnowledgeText(knowledgeItems), [knowledgeItems]);
   const knowledgeStatusLabel = knowledgeItems.length ? `${knowledgeItems.length}개 등록` : "미등록";
   const knowledgeStatusClassName = knowledgeItems.length ? styles.sidebarBadgeActive : styles.sidebarBadge;
@@ -478,7 +573,24 @@ export function PdpMakerClient() {
       }
 
       const nextMaterials = await Promise.all(selectedFiles.map((file) => prepareSourceMaterialFile(file)));
-      const primaryMaterial = nextMaterials.find((material) => material.preparedImage);
+      // MERGE with already-registered materials instead of replacing them: the guidance banner
+      // tells users to ADD a product photo to what they uploaded, so a second drop must not
+      // wipe the first. Re-dropping the same file (name+size) replaces its previous entry.
+      // getVisibleSourceMaterials also covers legacy drafts whose materials array is empty but
+      // whose primary image exists — without it, adding a photo would silently drop the page.
+      // When the 8-slot cap overflows, the NEW files win (the added product photo is the point).
+      const incomingKeys = new Set(nextMaterials.map((material) => `${material.fileName}:${material.size ?? 0}`));
+      const retainedMaterials = getVisibleSourceMaterials(sourceMaterials, preparedImage).filter(
+        (existing) => !incomingKeys.has(`${existing.fileName}:${existing.size ?? 0}`)
+      );
+      const retainedCapacity = Math.max(0, MAX_SOURCE_MATERIAL_FILES - Math.min(nextMaterials.length, MAX_SOURCE_MATERIAL_FILES));
+      const mergedMaterials = [...retainedMaterials.slice(0, retainedCapacity), ...nextMaterials].slice(
+        0,
+        MAX_SOURCE_MATERIAL_FILES
+      );
+      const mergedSkippedCount =
+        skippedCount + Math.max(0, retainedMaterials.length + nextMaterials.length - mergedMaterials.length);
+      const primaryMaterial = pickPrimarySourceMaterial(mergedMaterials);
 
       if (!primaryMaterial?.preparedImage) {
         setErrorMessage("분석에 사용할 수 있는 이미지/PDF 대표 화면을 만들지 못했습니다.");
@@ -486,27 +598,34 @@ export function PdpMakerClient() {
         return;
       }
 
-      const normalizedMaterials = markPrimarySourceMaterial(nextMaterials, primaryMaterial.id, primaryMaterial.preparedImage);
+      const normalizedMaterials = markPrimarySourceMaterial(mergedMaterials, primaryMaterial.id, primaryMaterial.preparedImage);
       const contextGuidance = buildUploadContextGuidance(normalizedMaterials, additionalInfo);
       setPreparedImage(primaryMaterial.preparedImage);
       setSourceMaterials(normalizedMaterials);
       setNotice(
         contextGuidance?.tone === "warning"
-          ? `${buildSourceMaterialsNotice(normalizedMaterials, skippedCount)} ${contextGuidance.message}`
-          : buildSourceMaterialsNotice(normalizedMaterials, skippedCount)
+          ? `${buildSourceMaterialsNotice(normalizedMaterials, mergedSkippedCount)} ${contextGuidance.message}`
+          : buildSourceMaterialsNotice(normalizedMaterials, mergedSkippedCount)
       );
       logSetupEvent("setup.source_materials_prepared", {
         totalCount: normalizedMaterials.length,
-        skippedCount,
+        skippedCount: mergedSkippedCount,
         imageCount: normalizedMaterials.filter((material) => material.kind === "image").length,
         pdfCount: normalizedMaterials.filter((material) => material.kind === "pdf").length,
         primary: summarizePreparedImageForUsageLog(primaryMaterial.preparedImage),
         contextGuidance: contextGuidance?.reason ?? "none"
       });
     } catch (error) {
-      setPreparedImage(null);
-      setSourceMaterials([]);
-      setErrorMessage(error instanceof Error ? error.message : "업로드 자료를 준비하지 못했습니다.");
+      // Do NOT wipe already-registered materials: with merge semantics a failed ADD (e.g. a
+      // HEIC/corrupt product photo added per the guidance banner) must not nuke the detail
+      // pages the user uploaded first. Keep existing state and surface the failure.
+      setErrorMessage(
+        sourceMaterials.length
+          ? "새로 추가한 자료를 읽지 못했습니다. 기존에 등록한 자료는 그대로 유지됩니다."
+          : error instanceof Error
+            ? error.message
+            : "업로드 자료를 준비하지 못했습니다."
+      );
       setErrorDetail(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
       logSetupEvent("setup.source_materials_prepare_failed", { count: selectedFiles.length }, "error", error instanceof Error ? error : String(error));
     } finally {
@@ -729,9 +848,18 @@ export function PdpMakerClient() {
       sectionCount: result?.blueprint.sections.length ?? INITIAL_HERO_SECTION_COUNT,
       benefits: [],
       notice: editorDraftState?.notice ?? notice,
-      editorState: result ? editorDraftState ?? createDefaultEditorDraftState(result, outputMode) : null
+      editorState: result ? editorDraftState ?? createDefaultEditorDraftState(result, outputMode) : null,
+      longPageTranscript: longPageTranscript ?? undefined,
+      // Complete iff it matches the cached (complete-only) transcript; refs are stable, no dep.
+      longPageTranscriptComplete: longPageTranscript
+        ? longPageTranscriptCacheRef.current?.transcript === longPageTranscript
+        : undefined,
+      longPageTranscriptKey:
+        longPageTranscript && longPageTranscriptCacheRef.current?.transcript === longPageTranscript
+          ? longPageTranscriptCacheRef.current.key
+          : undefined
     };
-  }, [activeDraftId, additionalInfo, aiProvider, appState, aspectRatio, customerReviewAnalysis, desiredTone, draftCreatedAt, editorDraftState, hasDraftContent, modelImage, modelImageUsage, notice, outputMode, preparedImage, result, sourceMaterials]);
+  }, [activeDraftId, additionalInfo, aiProvider, appState, aspectRatio, customerReviewAnalysis, desiredTone, draftCreatedAt, editorDraftState, hasDraftContent, longPageTranscript, modelImage, modelImageUsage, notice, outputMode, preparedImage, result, sourceMaterials]);
 
   const persistDraft = useCallback(
     async (mode: "manual" | "auto" | "switch" = "manual", options?: { showToast?: boolean }) => {
@@ -806,6 +934,8 @@ export function PdpMakerClient() {
     setModelImage(null);
     setModelImageUsage(null);
     setResult(null);
+    setLongPageTranscript(null);
+    longPageTranscriptCacheRef.current = null;
     setAdditionalInfo("");
     setCustomerReviewSource(null);
     setCustomerReviewAnalysis(null);
@@ -868,6 +998,19 @@ export function PdpMakerClient() {
         setModelImage(draft.modelImage ?? null);
         setModelImageUsage(draft.modelImageUsage ?? null);
         setResult(draft.result);
+        setLongPageTranscript(draft.longPageTranscript ?? null);
+        // Seed the re-analysis cache so regenerating a restored draft reuses the paid pass-1
+        // transcript. STORED key only (captured when the transcript was made) — recomputing
+        // from the restored pages would claim coverage of pages added AFTER transcription and
+        // silently skip them forever.
+        longPageTranscriptCacheRef.current =
+          draft.longPageTranscript && draft.longPageTranscriptComplete && draft.longPageTranscriptKey
+            ? {
+                key: draft.longPageTranscriptKey,
+                transcript: draft.longPageTranscript,
+                batchCount: 0
+              }
+            : null;
         setAdditionalInfo(draft.additionalInfo);
         setCustomerReviewSource(null);
         setCustomerReviewAnalysis(draft.customerReviewAnalysis);
@@ -1014,6 +1157,214 @@ export function PdpMakerClient() {
     };
   }, [appState]);
 
+  /**
+   * Pass-1 of the 2-pass long-page analysis: run the strips through /pdp/transcribe-strips in
+   * sequential batches (each request stays under Vercel's body limit) and stitch the verbatim
+   * transcripts. Failures stay VISIBLE: a failed batch leaves an explicit marker in the
+   * transcript and is counted, never silently skipped.
+   */
+  const transcribeLongPageStrips = async ({
+    strips,
+    provider,
+    geminiApiKey,
+    openAiApiKey,
+    pageIndex = 0,
+    pageCount = 1
+  }: {
+    strips: PdpAnalysisStrip[];
+    provider: PdpAiProvider;
+    geminiApiKey?: string | null;
+    openAiApiKey?: string | null;
+    pageIndex?: number;
+    pageCount?: number;
+  }): Promise<{ transcript: string | null; failedBatchCount: number; batchCount: number; truncated: boolean; fatal: boolean }> => {
+    // Greedy batching by count AND payload size: a batch closes at 6 strips or ~2.6MB of
+    // base64, whichever comes first, so wide-strip pages never 413 at the Vercel edge.
+    const batches: PdpAnalysisStrip[][] = [];
+    let currentBatch: PdpAnalysisStrip[] = [];
+    let currentBatchChars = 0;
+    for (const strip of strips) {
+      const stripChars = strip.base64.length;
+      const batchFull =
+        currentBatch.length >= TRANSCRIBE_STRIPS_PER_BATCH ||
+        (currentBatch.length > 0 && currentBatchChars + stripChars > TRANSCRIBE_BATCH_MAX_BASE64_CHARS);
+      if (batchFull) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentBatchChars = 0;
+      }
+      currentBatch.push(strip);
+      currentBatchChars += stripChars;
+    }
+    if (currentBatch.length) {
+      batches.push(currentBatch);
+    }
+
+    const parts: string[] = [];
+    let failedBatchCount = 0;
+    let previousSectionHint: string | undefined;
+    let fatalError = false;
+
+    for (let index = 0; index < batches.length && !fatalError; index += 1) {
+      setLoadingStep(
+        pageCount > 1
+          ? `상세페이지 원문을 받아쓰는 중입니다 (자료 ${pageIndex + 1}/${pageCount} · 구간 ${index + 1}/${batches.length}).`
+          : `상세페이지 원문을 받아쓰는 중입니다 (${index + 1}/${batches.length}).`
+      );
+      // Functional max keeps the bar monotonic against the elapsed-time ticker; the 10..38
+      // span is split across pages, then across batches within the page.
+      const pageSpan = 28 / pageCount;
+      const targetProgress = Math.min(38, 10 + Math.round(pageIndex * pageSpan + (index / batches.length) * pageSpan));
+      setLoadingProgress((current) => Math.max(current, targetProgress));
+
+      let batchTranscript: string | null = null;
+      for (let attempt = 0; attempt < 2 && batchTranscript === null && !fatalError; attempt += 1) {
+        try {
+          const response = await apiJson<PdpTranscribeStripsResponse>("/pdp/transcribe-strips", {
+            method: "POST",
+            body: JSON.stringify({
+              aiProvider: provider,
+              strips: batches[index],
+              batchIndex: index,
+              batchCount: batches.length,
+              previousSectionHint
+            })
+          }, { geminiApiKey, openAiApiKey, timeoutMs: GENERATION_API_TIMEOUT_MS });
+
+          if (!response.ok) {
+            // Key/quota/access errors won't heal on retry — abort the whole pass instead of
+            // burning attempt slots per batch; the analyze call surfaces the same error next.
+            if (response.code && TRANSCRIBE_FATAL_ERROR_CODES.has(response.code)) {
+              fatalError = true;
+              logSetupEvent(
+                "setup.long_page_transcribe_aborted",
+                { batchIndex: index, batchCount: batches.length, code: response.code },
+                "warn",
+                response.detail || response.message
+              );
+              break;
+            }
+            throw new Error(response.detail ? `${response.message}\n${response.detail}` : response.message);
+          }
+          batchTranscript = response.transcript;
+          previousSectionHint = response.lastSectionType;
+        } catch (error) {
+          if (attempt === 1) {
+            failedBatchCount += 1;
+            logSetupEvent(
+              "setup.long_page_transcribe_batch_failed",
+              { batchIndex: index, batchCount: batches.length },
+              "warn",
+              error instanceof Error ? error : String(error)
+            );
+          }
+        }
+      }
+
+      if (fatalError) {
+        break;
+      }
+
+      parts.push(
+        batchTranscript ??
+          `### 구간 배치 ${index + 1}/${batches.length}\n(전사 실패 — 이 구간은 스트립 이미지 판독으로만 분석됩니다.)`
+      );
+    }
+
+    if (fatalError || failedBatchCount >= batches.length) {
+      return {
+        transcript: null,
+        failedBatchCount: fatalError ? batches.length : failedBatchCount,
+        batchCount: batches.length,
+        truncated: false,
+        fatal: fatalError
+      };
+    }
+
+    const joined = parts.join("\n\n");
+    const truncated = joined.length > TRANSCRIBE_MAX_TRANSCRIPT_CHARS;
+    return {
+      transcript: truncated
+        ? `${joined.slice(0, TRANSCRIBE_MAX_TRANSCRIPT_CHARS)}\n(후략 — 분량 제한으로 하단 일부 구간이 생략됨)`
+        : joined,
+      failedBatchCount,
+      batchCount: batches.length,
+      truncated,
+      fatal: false
+    };
+  };
+
+  /**
+   * Transcribe EVERY long page in the upload set (primary + supporting, capped at
+   * MAX_TRANSCRIBE_PAGES). Without this, a detail page split across several captures loses
+   * every page but the first — measured on a real 3-capture run where 2/3 of the content
+   * never reached the model.
+   */
+  const transcribeLongPages = async ({
+    pages,
+    provider,
+    geminiApiKey,
+    openAiApiKey
+  }: {
+    pages: TranscriptionPage[];
+    provider: PdpAiProvider;
+    geminiApiKey?: string | null;
+    openAiApiKey?: string | null;
+  }): Promise<{ transcript: string | null; failedBatchCount: number; batchCount: number; truncated: boolean }> => {
+    const parts: string[] = [];
+    let failedBatchCount = 0;
+    let batchCount = 0;
+    let truncated = false;
+
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+      const page = pages[pageIndex];
+      const result = await transcribeLongPageStrips({
+        strips: page.strips,
+        provider,
+        geminiApiKey,
+        openAiApiKey,
+        pageIndex,
+        pageCount: pages.length
+      });
+      failedBatchCount += result.failedBatchCount;
+      batchCount += result.batchCount;
+      truncated = truncated || result.truncated;
+      // File-name-only headers: numbering here would collide with the analyze prompt's own
+      // "자료 N" numbering (upload order ≠ transcription order) and mislead materialIndex picks.
+      if (result.transcript) {
+        parts.push(pages.length > 1 ? `# [업로드 자료: ${page.label}]\n${result.transcript}` : result.transcript);
+      } else {
+        parts.push(`# [업로드 자료: ${page.label}]\n(이 자료는 전사에 실패해 이미지 판독으로만 분석됩니다.)`);
+      }
+      if (result.fatal) {
+        // Key/quota errors hit every subsequent call too — stop instead of burning more time.
+        const remaining = pages.length - pageIndex - 1;
+        if (remaining > 0) {
+          failedBatchCount += remaining;
+          batchCount += remaining;
+          parts.push(`(남은 자료 ${remaining}개는 동일 오류가 예상되어 전사를 중단했습니다.)`);
+        }
+        break;
+      }
+    }
+
+    const successfulParts = parts.length > 0 && failedBatchCount < batchCount;
+    if (!successfulParts) {
+      return { transcript: null, failedBatchCount, batchCount, truncated: false };
+    }
+
+    const joined = parts.join("\n\n");
+    if (joined.length > TRANSCRIBE_MAX_TRANSCRIPT_CHARS) {
+      return {
+        transcript: `${joined.slice(0, TRANSCRIBE_MAX_TRANSCRIPT_CHARS)}\n(후략 — 분량 제한으로 일부 자료 하단이 생략됨)`,
+        failedBatchCount,
+        batchCount,
+        truncated: true
+      };
+    }
+    return { transcript: joined, failedBatchCount, batchCount, truncated };
+  };
+
   const generateMissingSectionImages = async ({
     result,
     provider,
@@ -1071,6 +1422,11 @@ export function PdpMakerClient() {
             sectionImageDefaults.withModel &&
             (modelImageUsage === "all-sections" || (modelImageUsage === "hero-only" && index === 0))
         );
+        // An ungenerated hero only reaches this batch as the deferred-hero fallback (the normal
+        // flow arrives with sections[0] already generated). Mirror the server analyze path's
+        // hero options — always a model cut with the same persona defaults — so a fallback hero
+        // looks like a first-attempt hero, not a bare product shot.
+        const isDeferredHeroFallback = index === 0;
         const response = await apiJson<PdpGenerateImageResponse>("/pdp/images", {
           method: "POST",
           body: JSON.stringify({
@@ -1083,9 +1439,12 @@ export function PdpMakerClient() {
             options: {
               aiProvider: provider,
               outputMode,
-              style: sectionImageDefaults.style,
-              withModel: shouldUseReferenceModel,
-              guidePriorityMode: sectionImageDefaults.guidePriorityMode,
+              style: isDeferredHeroFallback ? "studio" : sectionImageDefaults.style,
+              withModel: isDeferredHeroFallback ? true : shouldUseReferenceModel,
+              ...(isDeferredHeroFallback
+                ? { modelGender: "female", modelAgeRange: "20s", modelCountry: "korea" }
+                : {}),
+              guidePriorityMode: isDeferredHeroFallback ? "guide-first" : sectionImageDefaults.guidePriorityMode,
               headline: section.headline,
               subheadline: section.subheadline,
               referenceModelImageBase64: shouldUseReferenceModel ? modelImage?.base64 : undefined,
@@ -1300,6 +1659,96 @@ export function PdpMakerClient() {
         return;
       }
 
+      // 2-pass long-page analysis, pass 1: transcribe the strips verbatim BEFORE the blueprint
+      // call, so the blueprint cites the page's actual copy instead of downscaled pixels. Runs
+      // after the budget guard (a rejected request must not burn paid transcription calls); the
+      // transcript itself adds at most ~60KB of text to the analyze body — noise vs. the budget.
+      const analysisStripsForAnalyze = getPreparedImageStrips(imageForAnalyze);
+      // Structural access (like getPreparedImageStrips): imageForAnalyze may be a re-optimized
+      // payload shape that lacks the session-only sourceFile field.
+      const originalSourceFile = (imageForAnalyze as { sourceFile?: File }).sourceFile;
+      let longPageTranscriptForAnalyze: string | null = null;
+      let transcriptFailedBatchCount = 0;
+      let transcriptBatchCount = 0;
+      let transcriptTruncated = false;
+      let transcriptReused = false;
+      const transcriptionPages = selectTranscriptionPages(imageForAnalyze, sourceMaterialsForDraft);
+      // Pages beyond the MAX_TRANSCRIBE_PAGES cap are skipped — count them so the completion
+      // notice never claims "전부 받아써서" while silently dropping a capture.
+      const totalLongPageCandidates =
+        (getPreparedImageStrips(imageForAnalyze)?.length ? 1 : 0) +
+        sourceMaterialsForDraft.filter(
+          (material) =>
+            material.role !== "primary" &&
+            material.kind === "image" &&
+            (material.preparedImage?.analysisStrips?.length ?? 0) > 0
+        ).length;
+      const transcriptSkippedPages = Math.max(0, totalLongPageCandidates - transcriptionPages.length);
+      if (transcriptionPages.length) {
+        const stripsCacheKey = buildTranscriptionCacheKey(transcriptionPages);
+        const cachedTranscript = longPageTranscriptCacheRef.current;
+        if (cachedTranscript && cachedTranscript.key === stripsCacheKey) {
+          // Same pages, complete transcript already paid for — reuse instead of re-billing
+          // pass 1 on every retry after an analyze failure (429/timeout) or regeneration.
+          longPageTranscriptForAnalyze = cachedTranscript.transcript;
+          transcriptBatchCount = cachedTranscript.batchCount;
+          transcriptReused = true;
+          setLongPageTranscript(cachedTranscript.transcript);
+          logSetupEvent("setup.long_page_transcript_reused", {
+            batchCount: cachedTranscript.batchCount,
+            transcriptChars: cachedTranscript.transcript.length
+          });
+        } else {
+          const transcription = await transcribeLongPages({
+            pages: transcriptionPages,
+            provider: processingProvider,
+            geminiApiKey: currentGeminiApiKey,
+            openAiApiKey: currentOpenAiApiKey
+          });
+          longPageTranscriptForAnalyze = transcription.transcript;
+          transcriptFailedBatchCount = transcription.failedBatchCount;
+          transcriptBatchCount = transcription.batchCount;
+          transcriptTruncated = transcription.truncated;
+          setLongPageTranscript(transcription.transcript);
+          // Cache only COMPLETE transcripts: a partial one must stay retryable, as the
+          // completion notice promises ("다시 생성하면 받아쓰기를 재시도합니다").
+          if (transcription.transcript && transcription.failedBatchCount === 0) {
+            longPageTranscriptCacheRef.current = {
+              key: stripsCacheKey,
+              transcript: transcription.transcript,
+              batchCount: transcription.batchCount
+            };
+          }
+          logSetupEvent("setup.long_page_transcribed", {
+            pageCount: transcriptionPages.length,
+            batchCount: transcription.batchCount,
+            failedBatchCount: transcription.failedBatchCount,
+            truncated: transcription.truncated,
+            transcriptChars: transcription.transcript?.length ?? 0
+          });
+        }
+      } else {
+        // Not a long page: clear any transcript left from a previous analysis in this session,
+        // or it would leak into the new draft and this product's section expansion.
+        setLongPageTranscript(null);
+        longPageTranscriptCacheRef.current = null;
+      }
+      // Hero generation is deferred to this client whenever we can upgrade the reference:
+      // the original upload still in memory (fresh session — enables the full-res crop) OR an
+      // attached product-photo candidate the model may pick (works on restored drafts too —
+      // the photo's payload IS persisted, unlike sourceFile). Deferring is always safe: the
+      // server still returns its heroReference as the fallback reference.
+      const hasAttachedProductImageCandidate = sourceMaterialsForDraft.some(
+        (material) =>
+          material.role !== "primary" &&
+          material.kind === "image" &&
+          Boolean(material.preparedImage?.base64) &&
+          material.preparedImage?.analysisMetadata?.mode !== "long-detail-strips"
+      );
+      const deferHeroGeneration = Boolean(
+        analysisStripsForAnalyze?.length && (originalSourceFile || hasAttachedProductImageCandidate)
+      );
+
       setLoadingStep("제품을 분석하고 히어로우 첫 장을 설계하는 중입니다.");
 
       const response = await apiJson<PdpAnalyzeResponse>("/pdp/analyze", {
@@ -1313,7 +1762,9 @@ export function PdpMakerClient() {
           generationImageBase64: imageForAnalyze.generationBase64 ?? imageForAnalyze.base64,
           generationImageMimeType: imageForAnalyze.generationMimeType ?? imageForAnalyze.mimeType,
           imageOptimization: imageForAnalyze.analysisMetadata,
-          analysisStrips: getPreparedImageStrips(imageForAnalyze),
+          analysisStrips: analysisStripsForAnalyze,
+          longPageTranscript: longPageTranscriptForAnalyze ?? undefined,
+          deferHeroGeneration: deferHeroGeneration || undefined,
           sourceMaterials: sourceMaterialsForAnalyze,
           modelImageBase64: modelImage?.base64,
           modelImageMimeType: modelImage?.mimeType,
@@ -1362,6 +1813,141 @@ export function PdpMakerClient() {
         });
       }
 
+      // 2-pass follow-up: the strips located the product ("위치는 축소본에서"), now cut the
+      // reference from the ORIGINAL upload at full resolution ("오려내기는 원본에서"). Strip
+      // crops are legible enough for text but too blurry as product-appearance references.
+      let heroReferenceUpgraded = false;
+      let usedAttachedProductImage = false;
+      let attachedProductImageFileName = "";
+      if (deferHeroGeneration) {
+        // 1st priority: a real standalone product photo the model identified among the uploads —
+        // an actual photo beats any crop guessed out of a detail-page capture. The pick is
+        // re-validated here (image kind, has payload, NOT a long page) so a model mistake can
+        // never route a page capture into the appearance reference.
+        const referencePick = response.result.blueprint.referenceProductImage;
+        if (referencePick && referencePick.confidence >= REFERENCE_PRODUCT_IMAGE_MIN_CONFIDENCE) {
+          const pickedIndex = referencePick.materialIndex - 1;
+          const pickedMaterial = sourceMaterialsForDraft[pickedIndex];
+          const pickedImage = pickedMaterial?.preparedImage;
+          // The pick must be an image the model actually SAW: it needs an image payload in the
+          // wire request AND must sit within the server's 5-image vision cap — otherwise the
+          // model is pointing at a picture it never looked at.
+          const imagesSentBeforePicked =
+            sourceMaterialsForAnalyze?.slice(0, pickedIndex).filter((material) => material.imageBase64).length ?? 0;
+          const pickedWasSeenByModel =
+            Boolean(sourceMaterialsForAnalyze?.[pickedIndex]?.imageBase64) &&
+            imagesSentBeforePicked < MAX_ANALYZE_SOURCE_IMAGES_SENT;
+          const pickedIsUsable =
+            pickedWasSeenByModel &&
+            pickedMaterial?.kind === "image" &&
+            Boolean(pickedImage?.base64) &&
+            pickedImage?.analysisMetadata?.mode !== "long-detail-strips";
+          if (pickedIsUsable && pickedImage) {
+            nextResult = {
+              ...nextResult,
+              originalImage: pickedImage.generationBase64 ?? pickedImage.base64,
+              originalImageMimeType: pickedImage.generationMimeType ?? pickedImage.mimeType,
+              originalImageFileName: pickedMaterial.fileName || "product-reference.jpg"
+            };
+            usedAttachedProductImage = true;
+            attachedProductImageFileName = pickedMaterial.fileName || "";
+          }
+        }
+
+        // 2nd priority: crop productCutRegion out of the ORIGINAL upload at full resolution.
+        const region = response.result.blueprint.productCutRegion;
+        if (!usedAttachedProductImage && originalSourceFile && region && region.confidence >= PRODUCT_CUT_RECROP_MIN_CONFIDENCE) {
+          setLoadingStep("원본 화질로 제품컷을 잘라내는 중입니다.");
+          const crop = await cropProductCutFromOriginalFile(originalSourceFile, region);
+          if (crop) {
+            nextResult = {
+              ...nextResult,
+              originalImage: crop.base64,
+              originalImageMimeType: crop.mimeType,
+              originalImageFileName: "product-reference-original.jpg"
+            };
+            heroReferenceUpgraded = true;
+          }
+        }
+        logSetupEvent("setup.long_page_hero_reference", {
+          referenceSource: usedAttachedProductImage
+            ? "attached-product-image"
+            : heroReferenceUpgraded
+              ? "original-crop"
+              : "server-fallback",
+          attachedPickConfidence: referencePick?.confidence,
+          attachedPickIndex: referencePick?.materialIndex,
+          upgradedToOriginalCrop: heroReferenceUpgraded,
+          productCutConfidence,
+          hadOriginalFile: Boolean(originalSourceFile)
+        });
+
+        // The server skipped hero generation (deferHeroGeneration); generate it now with the
+        // same options the server path would have used, but with the upgraded reference. On
+        // failure the hero stays ungenerated and generateMissingSectionImages below retries it,
+        // so a persistent failure lands in the existing failedCount UX instead of vanishing.
+        const heroSection = nextResult.blueprint.sections[0];
+        if (heroSection && !heroSection.generatedImage) {
+          setLoadingStep("히어로우 첫 장을 생성하는 중입니다.");
+          try {
+            const heroResponse = await apiJson<PdpGenerateImageResponse>("/pdp/images", {
+              method: "POST",
+              body: JSON.stringify({
+                originalImageBase64: nextResult.originalImage,
+                originalImageMimeType: nextResult.originalImageMimeType,
+                originalImageFileName: nextResult.originalImageFileName,
+                section: heroSection,
+                aspectRatio,
+                desiredTone: desiredTone.trim() || undefined,
+                options: {
+                  aiProvider: processingProvider,
+                  outputMode,
+                  style: "studio",
+                  withModel: true,
+                  modelGender: "female",
+                  modelAgeRange: "20s",
+                  modelCountry: "korea",
+                  guidePriorityMode: "guide-first",
+                  headline: heroSection.headline,
+                  subheadline: heroSection.subheadline,
+                  referenceModelImageBase64: modelImage?.base64,
+                  referenceModelImageMimeType: modelImage?.mimeType,
+                  referenceModelImageFileName: modelImage?.fileName
+                }
+              })
+            }, { geminiApiKey: currentGeminiApiKey, openAiApiKey: currentOpenAiApiKey, timeoutMs: GENERATION_API_TIMEOUT_MS });
+
+            if (heroResponse.ok) {
+              nextResult = {
+                ...nextResult,
+                blueprint: {
+                  ...nextResult.blueprint,
+                  sections: nextResult.blueprint.sections.map((section, index) =>
+                    index === 0
+                      ? { ...section, generatedImage: `data:${heroResponse.mimeType};base64,${heroResponse.imageBase64}` }
+                      : section
+                  )
+                }
+              };
+            } else {
+              logSetupEvent(
+                "setup.long_page_hero_generation_failed",
+                { code: heroResponse.code },
+                "warn",
+                heroResponse.detail || heroResponse.message
+              );
+            }
+          } catch (error) {
+            logSetupEvent(
+              "setup.long_page_hero_generation_failed",
+              undefined,
+              "warn",
+              error instanceof Error ? error : String(error)
+            );
+          }
+        }
+      }
+
       setLoadingProgress(42);
       const batchResult = await generateMissingSectionImages({
         result: nextResult,
@@ -1378,15 +1964,40 @@ export function PdpMakerClient() {
         usedLongDetailStrips && (sellingPointCount > 0 || weaknessCount > 0)
           ? ` 업로드한 상세페이지에서 셀링포인트 ${sellingPointCount}개와 개선 포인트 ${weaknessCount}개를 읽어 새 구성에 반영했습니다.`
           : "";
+      // Failure-visibility: transcription problems must be readable in the completion notice,
+      // not only in usage logs — a page analyzed without its copy inventory is a quality drop
+      // the user should know about.
+      const transcriptSkippedNote =
+        transcriptSkippedPages > 0 ? ` 긴 자료가 많아 ${transcriptSkippedPages}개 자료는 원문 반영에서 제외했습니다.` : "";
+      const transcriptNotice = transcriptionPages.length
+        ? longPageTranscriptForAnalyze
+          ? transcriptReused
+            ? ` 이전에 받아쓴 상세페이지 원문을 재사용해 카피 설계에 반영했습니다.${transcriptSkippedNote}`
+            : transcriptFailedBatchCount > 0
+              ? ` 상세페이지 원문 받아쓰기 중 ${transcriptFailedBatchCount}/${transcriptBatchCount}개 구간은 실패해 해당 구간은 이미지 판독으로 대체했습니다.${transcriptSkippedNote}`
+              : transcriptTruncated || transcriptSkippedPages > 0
+                ? ` 상세페이지 원문을 받아써 카피 설계에 반영했습니다${transcriptTruncated ? " (분량 제한으로 하단 일부는 생략)" : ""}.${transcriptSkippedNote}`
+                : " 상세페이지 원문을 전부 받아써서 카피 설계에 반영했습니다."
+          : " 상세페이지 원문 받아쓰기에 실패해 이번 결과는 이미지 판독만으로 생성됐습니다. 다시 생성하면 받아쓰기를 재시도합니다."
+        : "";
+      const heroReferenceNotice = usedAttachedProductImage
+        ? ` 제품 생김새는 함께 올려주신 "${attachedProductImageFileName || "제품 사진"}"을 참조해 생성했습니다.`
+        : heroReferenceUpgraded
+          ? " 제품 생김새는 상세페이지에서 원본 화질로 잘라낸 제품컷을 참조했습니다."
+          : "";
       // Failure-visibility: when the tool could not confidently identify a clean product cut (or the
       // page shows several products), surface a PROMINENT warning banner with a fix action instead of
       // burying it in the success notice — a wrong hero should be obvious, not silent.
-      const heroWarning = multiProductDetected
-        ? "히어로 제품 확인 필요 — 업로드한 상세페이지에 제품이 여러 개 보여서, 히어로에 의도와 다른 제품이 들어갔을 수 있어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 깨끗한 제품 사진 1장을 대표 이미지로 올려 다시 생성하세요."
-        : productCutUncertain
-          ? "히어로 제품 확인 필요 — 이 상세페이지에서 ‘깨끗한 제품컷’을 확신하지 못해(배너·연출컷 위주) 대표 구간으로 히어로를 만들었어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 깨끗한 제품 사진 1장을 대표 이미지로 올려 다시 생성하세요."
-          : "";
-      const completedNotice = `${baseCompletedNotice}${insightNotice}`;
+      // With an explicit attached product photo as the appearance reference, the "wrong
+      // product in hero" warnings no longer apply — the appearance is anchored to a real photo.
+      const heroWarning = usedAttachedProductImage
+        ? ""
+        : multiProductDetected
+          ? "히어로 제품 확인 필요 — 업로드한 상세페이지에 제품이 여러 개 보여서, 히어로에 의도와 다른 제품이 들어갔을 수 있어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 제품만 단독으로 나온 깨끗한 사진 1장을 같은 업로드 칸에 추가해 다시 생성하세요."
+          : productCutUncertain
+            ? "히어로 제품 확인 필요 — 이 상세페이지에서 ‘깨끗한 제품컷’을 확신하지 못해(배너·연출컷 위주) 대표 구간으로 히어로를 만들었어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 제품만 단독으로 나온 깨끗한 사진 1장을 같은 업로드 칸에 추가해 다시 생성하세요."
+            : "";
+      const completedNotice = `${baseCompletedNotice}${insightNotice}${transcriptNotice}${heroReferenceNotice}`;
       const nextEditorDraftState = {
         ...createDefaultEditorDraftState(nextResult, outputMode),
         notice: completedNotice,
@@ -1416,7 +2027,16 @@ export function PdpMakerClient() {
           sectionCount: nextResult.blueprint.sections.length || INITIAL_HERO_SECTION_COUNT,
           benefits: [],
           notice: completedNotice,
-          editorState: nextEditorDraftState
+          editorState: nextEditorDraftState,
+          longPageTranscript: longPageTranscriptForAnalyze ?? undefined,
+          longPageTranscriptComplete: longPageTranscriptForAnalyze
+            ? transcriptReused || transcriptFailedBatchCount === 0
+            : undefined,
+          longPageTranscriptKey:
+            longPageTranscriptForAnalyze &&
+            longPageTranscriptCacheRef.current?.transcript === longPageTranscriptForAnalyze
+              ? longPageTranscriptCacheRef.current.key
+              : undefined
         });
 
         setActiveDraftId(savedDraft.id);
@@ -1827,6 +2447,7 @@ export function PdpMakerClient() {
           desiredTone={desiredTone}
           additionalInfo={additionalInfo}
           customerReviewAnalysis={customerReviewAnalysis}
+          longPageTranscript={longPageTranscript}
           initialDraftState={editorDraftState}
           initialResult={result}
           lastSavedAt={lastSavedAt}
@@ -1849,12 +2470,14 @@ export function PdpMakerClient() {
           open={isSettingsOpen}
           settings={clientSettings}
         />
+        <div aria-hidden="true" className={styles.versionBadge}>버전 {PDP_APP_VERSION}</div>
       </>
     );
   }
 
   return (
     <main className={styles.page}>
+      <div aria-hidden="true" className={styles.versionBadge}>버전 {PDP_APP_VERSION}</div>
       <section className={styles.shell}>
         <aside className={styles.wizardSidebar}>
           <div className={styles.sidebarTopRow}>
@@ -2142,41 +2765,16 @@ export function PdpMakerClient() {
                 accept="image/*,.pdf,application/pdf"
                 description="제품컷, 패키지컷, 기존 상세페이지 캡처 이미지와 PDF를 여러 개 선택할 수 있습니다."
                 disabled={isReadingSourceMaterials}
-                hint={isReadingSourceMaterials ? "자료를 읽는 중입니다." : "최대 8개 · 이미지는 분석용 최적화 · PDF는 텍스트와 대표 페이지 반영"}
+                hint={
+                  isReadingSourceMaterials
+                    ? "자료를 읽는 중입니다."
+                    : `최대 8개 · 상세페이지 이미지는 최대 ${MAX_TRANSCRIBE_PAGES}장까지 원문 반영 · PDF는 텍스트 반영`
+                }
                 multiple
                 onSelect={handleSourceMaterialFiles}
                 selectedFileName={sourceMaterialDropzoneLabel}
                 title="상세페이지 자료 업로드"
               />
-
-              {preparedImage ? (
-                <div className={`${styles.uploadPreviewCard} ${styles.mainUploadPreviewCard}`}>
-                  <div className={styles.previewFrame}>
-                    <img alt={preparedImage.fileName} className={styles.selectedImage} src={preparedImage.previewUrl} />
-                  </div>
-                  <div className={styles.uploadMeta}>
-                    <strong title={preparedImage.fileName}>{preparedImageDisplayName}</strong>
-                    <div className={styles.metaList}>
-                      <div className={styles.metaItem}>
-                        <span>전송 포맷</span>
-                        <strong>{formatAnalysisMode(preparedImage)}</strong>
-                      </div>
-                      <div className={styles.metaItem}>
-                        <span>분석 크기</span>
-                        <strong>{formatOptimizedDimensions(preparedImage)}</strong>
-                      </div>
-                      <div className={styles.metaItem}>
-                        <span>{isLongDetailSampling(preparedImage) ? "상세페이지 절감" : "품질 기준"}</span>
-                        <strong>{formatOptimizationSavings(preparedImage)}</strong>
-                      </div>
-	                      <div className={styles.metaItem}>
-	                        <span>생성 참조</span>
-	                        <strong>{formatGenerationReference(preparedImage)}</strong>
-	                      </div>
-	                    </div>
-	                  </div>
-	                </div>
-	              ) : null}
 
 	              {visibleSourceMaterials.length ? (
 	                <div className={styles.sourceMaterialList} aria-label="등록된 상세페이지 자료">
@@ -2185,13 +2783,35 @@ export function PdpMakerClient() {
 	                      className={material.role === "primary" ? styles.sourceMaterialItemPrimary : styles.sourceMaterialItem}
 	                      key={material.id}
 	                    >
-	                      <span>{material.role === "primary" ? "대표 분석 자료" : formatSourceMaterialKind(material)}</span>
-	                      <strong title={material.fileName}>{formatCompactFileName(material.fileName)}</strong>
-	                      <small>{formatSourceMaterialDetail(material)}</small>
+	                      {material.previewUrl ? (
+	                        <img
+	                          alt={material.fileName}
+	                          className={styles.sourceMaterialThumb}
+	                          src={material.previewUrl}
+	                        />
+	                      ) : null}
+	                      <div className={styles.sourceMaterialMeta}>
+	                        <span>{sourceMaterialTypeLabels.get(material.id) ?? formatSourceMaterialKind(material)}</span>
+	                        <strong title={material.fileName}>{formatCompactFileName(material.fileName)}</strong>
+	                        <small>{formatSourceMaterialDetail(material)}</small>
+	                      </div>
 	                    </div>
 	                  ))}
 	                </div>
 	              ) : null}
+
+              {showProductImageGuidance ? (
+                <div className={styles.uploadContextWarning} role="status">
+                  <AlertCircle size={16} />
+                  <div>
+                    <strong>제품 이미지를 함께 올려주세요</strong>
+                    <span>
+                      제품 이미지를 별도로 등록해주어야 상세페이지 결과가 좋아집니다. 상단 [1 자료 등록] 단계에서 제품만
+                      단독으로 나온 사진 1장을 추가로 올려주세요(기존 자료는 유지됩니다).
+                    </span>
+                  </div>
+                </div>
+              ) : null}
 
               {modelUploadSection}
 
@@ -2386,7 +3006,7 @@ export function PdpMakerClient() {
 
                 <div className={styles.materialSummaryGrid}>
 	                  <div className={styles.materialSummaryItem}>
-	                    <span>대표 분석 자료</span>
+	                    <span>분석 자료</span>
 	                    <strong title={preparedImage?.fileName}>{preparedImageDisplayName || "이미지를 먼저 업로드해 주세요"}</strong>
 	                    {preparedImage ? <small>{sourceMaterialSummaryLabel}</small> : null}
 	                  </div>
@@ -2412,6 +3032,19 @@ export function PdpMakerClient() {
                   </div>
                 </div>
               </div>
+
+              {showProductImageGuidance ? (
+                <div className={styles.uploadContextWarning} role="status">
+                  <AlertCircle size={16} />
+                  <div>
+                    <strong>제품 이미지를 함께 올려주세요</strong>
+                    <span>
+                      제품 이미지를 별도로 등록해주어야 상세페이지 결과가 좋아집니다. [자료 수정]을 눌러 제품만 단독으로
+                      나온 사진 1장을 추가로 올려주세요(기존 자료는 유지됩니다).
+                    </span>
+                  </div>
+                </div>
+              ) : null}
 
               <div className={styles.fieldGroup}>
                 <span className={styles.fieldLabel}>출력 방식</span>
@@ -2977,7 +3610,9 @@ async function prepareSourceMaterialFile(file: File): Promise<PdpSourceMaterialD
     fileName: file.name.slice(0, 160),
     mimeType: file.type || preparedImage.mimeType,
     size: file.size,
-    preparedImage,
+    // Keep the original upload handle for the session so productCutRegion can be re-cropped
+    // from full-resolution pixels after analysis (dropped at draft-save by normalization).
+    preparedImage: { ...preparedImage, sourceFile: file },
     previewUrl: preparedImage.previewUrl
   };
 }
@@ -3133,6 +3768,39 @@ function createSourceMaterialId(file: File) {
   return `${Date.now()}-${file.name}-${file.size}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Role auto-assignment: a long detail page always owns the PRIMARY role (strips + verbatim
+ * transcription = the content source), regardless of upload order. A clean product photo
+ * uploaded first therefore stays a supporting appearance reference instead of silently
+ * demoting the detail page and killing its content capture. No UI change — the upload zone
+ * and slot count stay exactly as shown in the published tutorial video.
+ */
+function pickPrimarySourceMaterial(materials: PdpSourceMaterialDraft[]) {
+  return (
+    materials.find((material) => material.preparedImage?.analysisMetadata?.mode === "long-detail-strips") ??
+    materials.find((material) => material.preparedImage)
+  );
+}
+
+/**
+ * True when the upload set has a long detail page but NO standalone product image candidate
+ * (a non-long, non-PDF image). Drives the "제품 이미지를 별도로 등록" guidance — without it
+ * most users upload only the detail page and hero appearance becomes a coin flip
+ * (measured: productCutConfidence 0.22 on a real subscriber-style page).
+ */
+function needsProductImageGuidance(materials: PdpSourceMaterialDraft[]) {
+  const hasLongPage = materials.some(
+    (material) => material.preparedImage?.analysisMetadata?.mode === "long-detail-strips"
+  );
+  const hasProductImageCandidate = materials.some(
+    (material) =>
+      material.kind === "image" &&
+      material.preparedImage &&
+      material.preparedImage.analysisMetadata?.mode !== "long-detail-strips"
+  );
+  return hasLongPage && !hasProductImageCandidate;
+}
+
 function markPrimarySourceMaterial(
   materials: PdpSourceMaterialDraft[],
   primaryId: string,
@@ -3216,9 +3884,8 @@ function buildAnalyzeSourceMaterials(materials: PdpSourceMaterialDraft[]): PdpSo
 
 function buildSourceMaterialsNotice(materials: PdpSourceMaterialDraft[], skippedCount: number) {
   const summary = summarizeSourceMaterialsForUi(materials);
-  const primary = materials.find((material) => material.role === "primary");
   const skipped = skippedCount ? ` 최대 ${MAX_SOURCE_MATERIAL_FILES}개까지만 반영되어 ${skippedCount}개는 제외했습니다.` : "";
-  return `${summary}를 준비했습니다. 대표 분석 자료는 ${primary?.fileName ?? "첫 자료"}입니다. PDF 텍스트와 보조 이미지는 상세페이지 분석에 함께 반영합니다.${skipped}`;
+  return `${summary}를 준비했습니다. 상세페이지 이미지는 최대 ${MAX_TRANSCRIBE_PAGES}장까지 원문을 읽고, 제품 이미지는 제품 생김새 참조로 사용합니다.${skipped}`;
 }
 
 function buildUploadContextGuidance(materials: PdpSourceMaterialDraft[], additionalInfo: string): UploadContextGuidance | null {
@@ -3269,14 +3936,47 @@ function hasUsefulProductContext(value: string) {
 }
 
 function summarizeSourceMaterialsForUi(materials: PdpSourceMaterialDraft[]) {
-  const imageCount = materials.filter((material) => material.kind === "image").length;
+  const longPageCount = materials.filter(
+    (material) => material.kind === "image" && material.preparedImage?.analysisMetadata?.mode === "long-detail-strips"
+  ).length;
+  const productImageCount = materials.filter(
+    (material) => material.kind === "image" && material.preparedImage?.analysisMetadata?.mode !== "long-detail-strips"
+  ).length;
   const pdfCount = materials.filter((material) => material.kind === "pdf").length;
   const parts = [
-    imageCount ? `이미지 ${imageCount}개` : "",
+    longPageCount ? `상세페이지 ${longPageCount}장` : "",
+    productImageCount ? `제품 이미지 ${productImageCount}장` : "",
     pdfCount ? `PDF ${pdfCount}개` : ""
   ].filter(Boolean);
 
   return parts.join(" · ") || `${materials.length}개 자료`;
+}
+
+/**
+ * 자료 카드 라벨 — 내용 유형 기준. "대표 분석 자료/보조 이미지"는 대표만 분석하는 것처럼
+ * 읽혀 혼동을 부르므로(한이룸 피드백), 긴 상세페이지는 "상세페이지 이미지 N"으로 번호를
+ * 매기고 제품 사진은 "제품 이미지"로 표시한다.
+ */
+function buildSourceMaterialTypeLabels(materials: PdpSourceMaterialDraft[]): Map<string, string> {
+  const longPageIds = materials
+    .filter(
+      (material) => material.kind === "image" && material.preparedImage?.analysisMetadata?.mode === "long-detail-strips"
+    )
+    .map((material) => material.id);
+  const labels = new Map<string, string>();
+  materials.forEach((material) => {
+    if (material.kind === "pdf") {
+      labels.set(material.id, "PDF 자료");
+      return;
+    }
+    if (material.preparedImage?.analysisMetadata?.mode === "long-detail-strips") {
+      const index = longPageIds.indexOf(material.id);
+      labels.set(material.id, longPageIds.length > 1 ? `상세페이지 이미지 ${index + 1}` : "상세페이지 이미지");
+      return;
+    }
+    labels.set(material.id, "제품 이미지");
+  });
+  return labels;
 }
 
 function formatSourceMaterialKind(material: PdpSourceMaterialDraft) {

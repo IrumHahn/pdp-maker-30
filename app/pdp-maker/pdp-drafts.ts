@@ -99,6 +99,12 @@ export interface PreparedImageDraft {
   // treat that single banner strip as the entire detail page.
   analysisStrips?: PdpAnalysisStrip[];
   analysisMetadata?: PdpAnalysisImageMetadata;
+  /**
+   * SESSION-ONLY handle to the user's original upload, kept so productCutRegion can be
+   * re-cropped from full-resolution pixels after analysis. Deliberately dropped by
+   * normalizePreparedImage so it is never persisted to IndexedDB.
+   */
+  sourceFile?: File;
 }
 
 export interface PdpSourceMaterialDraft extends PdpSourceMaterial {
@@ -129,6 +135,23 @@ export interface PdpDraftRecord {
   benefits: string[];
   notice: string;
   editorState: PdpEditorDraftState | null;
+  /**
+   * Pass-1 transcription of the uploaded long detail page. Persisted so a restored draft
+   * keeps its copy inventory for section expansion without re-running transcription.
+   */
+  longPageTranscript?: string;
+  /**
+   * True when every batch transcribed successfully. Only complete transcripts may seed the
+   * re-analysis cache — partial ones must stay retryable, as the completion notice promises.
+   */
+  longPageTranscriptComplete?: boolean;
+  /**
+   * Pages-derived cache key captured WHEN the transcript was made. Restored sessions seed the
+   * reuse cache with this stored key (never a recomputed one): if the user added another long
+   * page after transcription, the keys diverge and the new page gets transcribed instead of
+   * being silently skipped forever.
+   */
+  longPageTranscriptKey?: string;
 }
 
 export interface PdpDraftSummary {
@@ -200,7 +223,10 @@ export async function savePdpDraft(input: PdpDraftInput): Promise<PdpDraftRecord
     sectionCount: normalizeSectionCount(input.sectionCount),
     benefits: normalizeBenefitInputs(input.benefits),
     notice: input.notice,
-    editorState: input.editorState
+    editorState: input.editorState,
+    longPageTranscript: input.longPageTranscript,
+    longPageTranscriptComplete: input.longPageTranscriptComplete,
+    longPageTranscriptKey: input.longPageTranscriptKey
   };
 
   const normalizedRecord = normalizeDraftRecord(nextRecord);
@@ -263,8 +289,22 @@ function normalizeDraftRecord(record: PdpDraftRecord): PdpDraftRecord {
     sectionCount: normalizeSectionCount(record.sectionCount),
     benefits: normalizeBenefitInputs(record.benefits),
     notice: record.notice ?? "저장된 작업을 불러왔습니다.",
-    editorState: normalizeEditorState(record.editorState, result)
+    editorState: normalizeEditorState(record.editorState, result),
+    longPageTranscript: normalizeLongPageTranscript(record.longPageTranscript),
+    longPageTranscriptComplete: record.longPageTranscriptComplete === true ? true : undefined,
+    longPageTranscriptKey:
+      typeof record.longPageTranscriptKey === "string" && record.longPageTranscriptKey
+        ? record.longPageTranscriptKey.slice(0, 600)
+        : undefined
   };
+}
+
+function normalizeLongPageTranscript(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, 80_000) : undefined;
 }
 
 function normalizeSourceMaterialDrafts(value: unknown): PdpSourceMaterialDraft[] {

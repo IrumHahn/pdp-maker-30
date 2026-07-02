@@ -1191,12 +1191,32 @@
 .sourceMaterialItem,
 .sourceMaterialItemPrimary {
   display: grid;
-  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
   min-width: 0;
-  padding: 13px 14px;
+  padding: 11px 12px;
   border: 1px solid #dfe4dc;
   border-radius: 8px;
   background: #ffffff;
+}
+
+/* 자료마다 썸네일 표시 — 하나만 올라간 것처럼 보이던 혼동 방지. 긴 페이지는 첫 구간이 미리보기. */
+.sourceMaterialThumb {
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  border: 1px solid #e5e9e2;
+  object-fit: cover;
+  object-position: top;
+  background: #f4f6f2;
+  flex: 0 0 auto;
+}
+
+.sourceMaterialMeta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .sourceMaterialItemPrimary {
@@ -5577,6 +5597,20 @@
   justify-items: end;
   gap: 12px;
   pointer-events: none;
+}
+
+/* 화면 좌하단 앱 버전 배지 (버그신고 위젯은 우하단 — 충돌 없음). 클릭 방해 금지. */
+.versionBadge {
+  position: fixed;
+  left: 14px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 55;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: rgba(70, 84, 74, 0.55);
+  pointer-events: none;
+  user-select: none;
 }
 
 .bugReportFab,

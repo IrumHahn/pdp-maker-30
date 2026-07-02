@@ -74,6 +74,8 @@ interface PdpEditorProps {
   desiredTone: string;
   additionalInfo?: string;
   customerReviewAnalysis?: PdpCustomerReviewAnalysis | null;
+  /** Pass-1 transcript of the uploaded long detail page; feeds /pdp/expand as copy inventory. */
+  longPageTranscript?: string | null;
   initialDraftState?: PdpEditorDraftState | null;
   lastSavedAt?: string | null;
   manualSaveToastToken?: number;
@@ -379,6 +381,7 @@ export function PdpEditor({
   desiredTone,
   additionalInfo = "",
   customerReviewAnalysis = null,
+  longPageTranscript = null,
   initialDraftState,
   lastSavedAt,
   manualSaveToastToken = 0,
@@ -2257,10 +2260,15 @@ export function PdpEditor({
             style,
             reviewAnalysis: customerReviewAnalysis ?? undefined,
             productContext: {
+              additionalInfo: additionalInfo || undefined,
               desiredTone: desiredTone || undefined,
               aspectRatio,
               aiProvider,
-              outputMode
+              outputMode,
+              // Copy inventory transcribed from the user's original page (pass 1) — lets the
+              // body-copy expansion cite the page's actual claims instead of only the hero
+              // blueprint's summary lines.
+              longPageTranscript: longPageTranscript || undefined
             }
           })
         },

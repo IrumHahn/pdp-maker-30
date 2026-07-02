@@ -16,6 +16,7 @@ import type {
   PdpAnalysisStrip,
   PdpCurrentPageDiagnosis,
   PdpProductCutRegion,
+  PdpReferenceProductImage,
   PdpAnalyzeCustomerReviewsRequest,
   PdpOutputMode,
   PdpCustomerReviewAnalysis,
@@ -29,6 +30,7 @@ import type {
   PdpSectionVisualRole,
   PdpExpandRequest,
   PdpExpandResponse,
+  PdpTranscribeStripsRequest,
   NarrativeSpine,
   SectionStoryBeat,
   SectionBlueprint
@@ -47,6 +49,11 @@ const MAX_ANALYZE_SOURCE_MATERIALS = 8;
 const MAX_ANALYZE_SOURCE_IMAGES = 5;
 const MAX_ANALYZE_STRIPS = 16;
 const PRODUCT_CUT_MIN_CONFIDENCE = 0.5;
+// Pass-1 transcription (2-pass long-page analysis): per-batch strip cap keeps one request well
+// under Vercel's body limit; transcript caps bound the text injected into later prompts.
+const MAX_TRANSCRIBE_STRIPS_PER_BATCH = 8;
+const MAX_LONG_PAGE_TRANSCRIPT_CHARS = 60_000;
+const MAX_EXPAND_TRANSCRIPT_CHARS = 14_000;
 const MAX_ANALYZE_SOURCE_TEXT_CHARS = 40000;
 const MAX_ANALYZE_SOURCE_TEXT_CHARS_PER_FILE = 12000;
 const MODEL_ACCESS_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -143,10 +150,20 @@ const OPENAI_BLUEPRINT_SCHEMA = {
     "extractedSellingPoints",
     "currentPageDiagnosis",
     "productCutRegion",
-    "multiProductPage"
+    "multiProductPage",
+    "referenceProductImage"
   ],
   properties: {
     multiProductPage: { type: "boolean" },
+    referenceProductImage: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      required: ["materialIndex", "confidence"],
+      properties: {
+        materialIndex: { type: "number" },
+        confidence: { type: "number" }
+      }
+    },
     extractedSellingPoints: {
       type: "array",
       items: { type: "string" }
@@ -504,7 +521,8 @@ export class PdpService {
 	                  request.imageOptimization,
 	                  sourceMaterials,
 	                  request.knowledgeText,
-	                  request.customerReviewAnalysis
+	                  request.customerReviewAnalysis,
+	                  request.longPageTranscript
 	                )
 	              }
 	            ]
@@ -536,6 +554,14 @@ export class PdpService {
                   yEndRatio: { type: Type.NUMBER },
                   xStartRatio: { type: Type.NUMBER, nullable: true },
                   xEndRatio: { type: Type.NUMBER, nullable: true },
+                  confidence: { type: Type.NUMBER }
+                }
+              },
+              referenceProductImage: {
+                type: Type.OBJECT,
+                nullable: true,
+                properties: {
+                  materialIndex: { type: Type.NUMBER },
                   confidence: { type: Type.NUMBER }
                 }
               },
@@ -619,6 +645,18 @@ export class PdpService {
       fallbackMimeType: generationMimeType
     });
 
+    if (request.deferHeroGeneration && analysisStrips.length) {
+      // 2-pass mode: the client holds the ORIGINAL upload and generates the hero itself from a
+      // full-resolution productCutRegion crop. Return the blueprint with sections[0] ungenerated;
+      // heroReference stays as originalImage so the client has a working fallback reference.
+      return {
+        originalImage: heroReference.base64,
+        originalImageMimeType: heroReference.mimeType,
+        originalImageFileName: buildImageFileName("product-reference", heroReference.mimeType),
+        blueprint
+      };
+    }
+
     const firstImage = await this.generateSectionImageInternal({
       originalImageBase64: heroReference.base64,
       originalImageMimeType: heroReference.mimeType,
@@ -655,6 +693,100 @@ export class PdpService {
       originalImageFileName: buildImageFileName("product-reference", heroReference.mimeType),
       blueprint
     };
+  }
+
+  /**
+   * Pass-1 of the 2-pass long-page analysis: transcribe ONE batch of strips verbatim.
+   * The client runs batches sequentially (each request stays under Vercel's body limit)
+   * and stitches the transcripts; the stitched text then feeds analyze/expand prompts.
+   */
+  async transcribeStrips(
+    request: PdpTranscribeStripsRequest,
+    geminiApiKeyOverride?: string,
+    openAiApiKeyOverride?: string
+  ): Promise<{ transcript: string; lastSectionType?: string }> {
+    const strips = normalizeAnalysisStrips(request.strips).slice(0, MAX_TRANSCRIBE_STRIPS_PER_BATCH);
+    if (!strips.length) {
+      throw new PdpServiceError("INVALID_REQUEST", "전사할 스트립 이미지가 없습니다.", "transcribe: empty strips");
+    }
+
+    const batchIndex = Number.isFinite(request.batchIndex) ? Math.max(0, Math.floor(request.batchIndex)) : 0;
+    const batchCount = Number.isFinite(request.batchCount)
+      ? Math.max(batchIndex + 1, Math.floor(request.batchCount))
+      : batchIndex + 1;
+    const prompt = buildTranscribeStripsPrompt(
+      strips,
+      batchIndex,
+      batchCount,
+      request.previousSectionHint
+    );
+    const aiProvider = normalizeAiProvider(request.aiProvider);
+
+    if (aiProvider === "openai") {
+      return retryOperation(async () => {
+        const apiKey = this.getRequiredOpenAiApiKey(openAiApiKeyOverride);
+        const response = await openAiJsonRequest<OpenAiResponsePayload>(apiKey, "/responses", {
+          method: "POST",
+          body: {
+            model: OPENAI_ANALYZE_MODEL,
+            input: [
+              {
+                role: "system",
+                content:
+                  "You are a meticulous Korean ecommerce detail-page transcriber. Transcribe every visible character faithfully and return only valid JSON shaped as { transcript, lastSectionType }."
+              },
+              {
+                role: "user",
+                content: [{ type: "input_text", text: prompt }, ...buildOpenAiStripImageInputs(strips)]
+              }
+            ],
+            text: {
+              format: {
+                type: "json_schema",
+                name: "hanirum_pdp_transcript",
+                schema: {
+                  type: "object",
+                  properties: {
+                    transcript: { type: "string" },
+                    lastSectionType: { type: "string" }
+                  },
+                  required: ["transcript", "lastSectionType"],
+                  additionalProperties: false
+                },
+                strict: true
+              }
+            }
+          }
+        });
+        const text = extractOpenAiResponseText(response);
+        return parseTranscriptPayload(extractJsonCandidate(text) ?? text, "openai");
+      });
+    }
+
+    return retryOperation(async () => {
+      const apiKey = this.getRequiredApiKey(geminiApiKeyOverride);
+      const client = this.createClient(apiKey);
+      const response = await client.models.generateContent({
+        model: ANALYZE_MODEL,
+        contents: [
+          {
+            parts: [...buildGeminiStripImageParts(strips), { text: prompt }]
+          }
+        ] as any,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              transcript: { type: Type.STRING },
+              lastSectionType: { type: Type.STRING }
+            }
+          }
+        }
+      });
+      return parseTranscriptPayload(extractResponseText(response), "gemini");
+    });
   }
 
   async expandLandingPage(
@@ -813,7 +945,8 @@ export class PdpService {
       request.imageOptimization,
       sourceMaterials,
       request.knowledgeText,
-      request.customerReviewAnalysis
+      request.customerReviewAnalysis,
+      request.longPageTranscript
     );
 
     const response = await openAiJsonRequest<OpenAiResponsePayload>(apiKey, "/responses", {
@@ -870,6 +1003,17 @@ export class PdpService {
       fallbackBase64: generationImage,
       fallbackMimeType: generationMimeType
     });
+
+    if (request.deferHeroGeneration && analysisStrips.length) {
+      // 2-pass mode: the client generates the hero from a full-resolution productCutRegion crop
+      // of the original upload (see the Gemini path for details).
+      return {
+        originalImage: heroReference.base64,
+        originalImageMimeType: heroReference.mimeType,
+        originalImageFileName: buildImageFileName("product-reference", heroReference.mimeType),
+        blueprint
+      };
+    }
 
     const firstImage = await this.generateSectionImageWithOpenAi(
       {
@@ -1545,6 +1689,19 @@ function buildExpandPrompt(request: PdpExpandRequest): string {
     .map((section, index) => `${index + 1}. [${section.id}] ${section.name} — ${section.intent}`)
     .join("\n");
 
+  const transcriptSource = ctx.longPageTranscript?.trim() ?? "";
+  const transcriptBlock = transcriptSource
+    ? [
+        "[원본 상세페이지 카피 인벤토리 — 전사]: 아래는 사용자가 올린 기존 상세페이지에서 실제로 받아쓴 전체 카피와 섹션 구성입니다. 이 페이지가 무엇을 어떤 순서로 약속했는지가 여기 담겨 있으니, 각 섹션의 headline/subheadline/bullets/trust 라인은 이 인벤토리의 사실 범위 안에서 더 강하게 재구성하세요.",
+        "전사에 없는 수치/인증/효능/후기를 새로 만들지 마세요. 전사에서 반복 강조된 셀링포인트는 새 페이지에서도 누락하지 마세요.",
+        "<상세페이지_전사>",
+        transcriptSource.length > MAX_EXPAND_TRANSCRIPT_CHARS
+          ? `${transcriptSource.slice(0, MAX_EXPAND_TRANSCRIPT_CHARS)}\n(후략 — 전사가 길어 일부 생략됨)`
+          : transcriptSource,
+        "</상세페이지_전사>"
+      ].join("\n")
+    : "";
+
   const reviewBlock = hasReviews
     ? [
         `[고객 후기 인사이트 — ${review!.reviewCount}건]`,
@@ -1572,6 +1729,8 @@ function buildExpandPrompt(request: PdpExpandRequest): string {
 - 핵심 메시지(keyMessage): ${style.keyMessage}
 - 생성할 섹션 로스터(이 순서·역할 그대로, 정확히 ${style.sectionRoster.length}개, 히어로는 제외):
 ${rosterLines}
+
+${transcriptBlock}
 
 ${reviewBlock}
 
@@ -1630,11 +1789,13 @@ function buildAnalyzePrompt(
   imageOptimization?: PdpAnalysisImageMetadata,
   sourceMaterials?: PdpSourceMaterial[],
   knowledgeText?: string,
-  customerReviewAnalysis?: PdpCustomerReviewAnalysis
+  customerReviewAnalysis?: PdpCustomerReviewAnalysis,
+  longPageTranscript?: string
 ) {
   const targetSectionCount = normalizeSectionCount(sectionCount);
   const manualBenefits = normalizeBenefitInputs(benefits);
   const imageOptimizationPrompt = buildImageOptimizationPrompt(imageOptimization);
+  const longPageTranscriptPrompt = buildLongPageTranscriptPrompt(longPageTranscript);
   const sourceMaterialsPrompt = buildSourceMaterialsPrompt(sourceMaterials);
   const knowledgePrompt = buildKnowledgePrompt(knowledgeText);
   const customerReviewPrompt = buildCustomerReviewPrompt(customerReviewAnalysis);
@@ -1721,6 +1882,7 @@ ${outputModePrompt}
 ${additionalInfo ? `[사용자 추가 정보]: ${additionalInfo}` : ""}
 ${desiredTone ? `[원하는 디자인 톤]: ${desiredTone}` : ""}
 ${imageOptimizationPrompt}
+${longPageTranscriptPrompt}
 ${sourceMaterialsPrompt}
 ${referenceModelPrompt}
 ${manualBenefitsPrompt}
@@ -1806,6 +1968,96 @@ function buildStoryBrandSellingPrompt(customerReviewAnalysis?: PdpCustomerReview
     hasReviews
       ? "- 후기 데이터가 있으므로 모든 섹션은 후기에서 나온 장점/아쉬움/샘플 문장을 눈에 보이게 활용하세요. 장점은 문제 제기에서 역질문으로, 해결/확신에서는 구매 이유로 다시 사용하세요."
       : "- 후기 데이터가 없다면 카테고리의 일반적인 구매 전 불편을 구체적으로 다루세요. 단, 검증되지 않은 효능, 수치, 인증, 실제 후기처럼 보이는 문장은 만들지 마세요."
+  ].join("\n");
+}
+
+/**
+ * Pass-1 transcription prompt (adapted from the detail-page-analyzer PASS1 system prompt).
+ * Transcription completeness beats analysis: the transcript becomes the factual copy
+ * inventory every later prompt (blueprint, expand) cites.
+ */
+function buildTranscribeStripsPrompt(
+  strips: NormalizedAnalysisStrip[],
+  batchIndex: number,
+  batchCount: number,
+  previousSectionHint?: string
+) {
+  const stripLines = strips
+    .map(
+      (strip, index) =>
+        `- ${index + 1}번째 이미지 = 페이지 세로 ${(strip.yStartRatio * 100).toFixed(1)}%~${(strip.yEndRatio * 100).toFixed(1)}% 구간`
+    )
+    .join("\n");
+  const hint = previousSectionHint?.trim()
+    ? `이전 배치의 마지막 섹션 유형: ${previousSectionHint.trim().slice(0, 80)} (이 흐름이 첫 구간으로 이어질 수 있습니다.)`
+    : "";
+
+  return `당신은 한국 이커머스 상세페이지 전사 전문가입니다. 지금 전달되는 이미지들은 하나의 상품 상세페이지를 위에서 아래로 자른 연속 구간이며, 이번 배치는 전체 ${batchCount}개 중 ${batchIndex + 1}번째입니다.
+
+[구간 위치]
+${stripLines}
+${hint}
+
+각 구간에 대해 transcript 필드에 아래 형식의 마크다운을 작성하세요.
+
+### 구간 N (세로 X%~Y%)
+[전사] 이미지 안의 모든 한국어/영어 텍스트를 빠짐없이 그대로 받아쓰세요. 요약·의역 금지. 작은 글씨(성분표, 주의사항, 인증번호, 시험 수치, 고시정보)도 모두 포함하고, 읽을 수 없는 글자는 (판독불가)로 표시하세요. 구간 경계에서 잘린 문장은 보이는 부분까지만 적고 끝에 (절단)을 붙이세요. 텍스트가 없으면 "(텍스트 없음 — 이미지 연출만)"으로 표시하세요.
+[섹션 유형] 후킹 / 문제제기 / 혜택·약속 / 신뢰요소(리뷰·인증·수상·시험데이터) / 스펙·상세정보 / 비교 / FAQ / CTA·프로모션 / 배송·교환·법정정보 / 기타 중에서 판정.
+[연출] 실사·모델컷·제품단독컷·인포그래픽·도표 여부와 색감·톤을 1문장으로.
+
+규칙:
+1. 전사의 완전성이 최우선입니다. 분석·평가보다 받아쓰기가 중요합니다.
+2. 가격, 수치, 단위, 브랜드명, 제품명은 보이는 표기 그대로 적으세요. 추측으로 채우지 마세요.
+3. lastSectionType 필드에는 이번 배치 마지막 구간의 섹션 유형 하나만 적으세요.`;
+}
+
+function parseTranscriptPayload(
+  raw: string,
+  provider: "gemini" | "openai"
+): { transcript: string; lastSectionType?: string } {
+  const errorCode: PdpErrorCode = provider === "openai" ? "OPENAI_RESPONSE_INVALID" : "GEMINI_RESPONSE_INVALID";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new PdpServiceError(
+      errorCode,
+      "상세페이지 전사 응답을 해석하지 못했습니다.",
+      `transcribe: invalid JSON (${error instanceof Error ? error.message : String(error)})`
+    );
+  }
+
+  const transcript = asString((parsed as Record<string, unknown>)?.transcript).trim();
+  if (!transcript) {
+    throw new PdpServiceError(errorCode, "상세페이지 전사 결과가 비어 있습니다.", "transcribe: empty transcript");
+  }
+  const lastSectionType = asString((parsed as Record<string, unknown>)?.lastSectionType).trim().slice(0, 80);
+
+  return {
+    transcript: transcript.slice(0, MAX_LONG_PAGE_TRANSCRIPT_CHARS),
+    lastSectionType: lastSectionType || undefined
+  };
+}
+
+/**
+ * Injects the pass-1 transcript into the analyze prompt as the authoritative copy source.
+ * Without it the model can only use glyphs that survived strip downscaling.
+ */
+function buildLongPageTranscriptPrompt(transcript?: string) {
+  const trimmed = transcript?.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const capped =
+    trimmed.length > MAX_LONG_PAGE_TRANSCRIPT_CHARS
+      ? `${trimmed.slice(0, MAX_LONG_PAGE_TRANSCRIPT_CHARS)}\n(후략 — 전사가 길어 일부 생략됨)`
+      : trimmed;
+  return [
+    "[상세페이지 전문 전사]: 아래는 업로드된 상세페이지를 구간별로 실제로 받아쓴 전체 텍스트와 섹션 구성입니다. 스트립 이미지에서 작아서 읽기 어려운 글자도 이 전사에는 담겨 있으므로, 제품명/스펙/효능/인증/카피의 사실 근거로는 이 전사를 최우선으로 사용하세요. 이미지와 전사가 다르게 읽히면 전사를 우선하세요.",
+    "단, 전사에 없는 수치/인증/효능/후기를 새로 만들지 마세요. extractedSellingPoints와 currentPageDiagnosis도 이 전사를 근거로 작성하세요.",
+    "<상세페이지_전사>",
+    capped,
+    "</상세페이지_전사>"
   ].join("\n");
 }
 
@@ -2097,7 +2349,11 @@ function buildSourceMaterialsPrompt(sourceMaterials?: PdpSourceMaterial[]) {
     "[업로드 원본 자료 목록]: 사용자가 첫 단계에서 여러 이미지/PDF를 함께 등록했습니다.",
     "대표 분석 자료는 기본 이미지 입력입니다. 보조 이미지가 있으면 별도 비전 입력으로 함께 제공됩니다.",
     "PDF 텍스트는 원본 자료에서 추출한 근거입니다. PDF나 보조 이미지에서 확인되는 제품명, 구성, 사용법, 톤, 금지 표현은 상세페이지 전략에 반영하되, 명확히 확인되지 않는 수치/인증/효능/리뷰는 만들지 마세요.",
-    lines.join("\n\n")
+    lines.join("\n\n"),
+    "",
+    "[제품 참조 이미지 지목]: 위 자료들 중 '주력 제품이 단독으로, 헤드라인/배지/가격/합성 그래픽/모델 연출 없이 실물 그대로 또렷하게 나온 깨끗한 제품 사진'이 있으면 referenceProductImage에 그 자료 번호(materialIndex, 위 목록의 '자료 N' 번호)와 확신도(confidence 0~1)를 채우세요.",
+    "지목 금지: 상세페이지 캡처(세로로 긴 페이지), 세일/이벤트 배너, 여러 제품이 함께 나온 라인업 컷, 텍스트가 얹힌 마케팅 합성 컷, 주력 제품이 아닌 다른 제품(번들/형제 제품) 사진. 이미지가 비전 입력으로 제공되지 않은 자료도 지목하지 마세요.",
+    "확실한 후보가 없으면 referenceProductImage를 null로 두거나 confidence를 0.3 이하로 주세요. 애매하면 낮게 — 잘못 지목하면 다른 제품 외형으로 페이지가 생성됩니다."
   ].join("\n");
 }
 
@@ -3062,8 +3318,27 @@ function sanitizeBlueprint(input: Partial<LandingPageBlueprint>) {
     extractedSellingPoints: asStringArray(input.extractedSellingPoints),
     currentPageDiagnosis: sanitizeCurrentPageDiagnosis(input.currentPageDiagnosis),
     productCutRegion: sanitizeProductCutRegion(input.productCutRegion),
-    multiProductPage: input.multiProductPage === true
+    multiProductPage: input.multiProductPage === true,
+    referenceProductImage: sanitizeReferenceProductImage(input.referenceProductImage)
   } satisfies LandingPageBlueprint;
+}
+
+// Shape-only validation; the CLIENT re-validates the index against its own material list
+// (kind, image payload, not-a-long-page) before using the pick as a generation reference.
+function sanitizeReferenceProductImage(input: unknown): PdpReferenceProductImage | undefined {
+  if (!input || typeof input !== "object") {
+    return undefined;
+  }
+  const value = input as Record<string, unknown>;
+  const materialIndex = Number(value.materialIndex);
+  const confidenceRaw = Number(value.confidence);
+  if (!Number.isInteger(materialIndex) || materialIndex < 1) {
+    return undefined;
+  }
+  return {
+    materialIndex,
+    confidence: Number.isFinite(confidenceRaw) ? Math.min(1, Math.max(0, confidenceRaw)) : 0
+  };
 }
 
 function normalizeSection(section: Partial<SectionBlueprint>, index: number): SectionBlueprint {

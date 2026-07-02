@@ -112,6 +112,20 @@ export interface LandingPageBlueprint {
   // true when the reference page shows more than one distinct product (bundle/related/cross-sell);
   // drives an always-on "verify the intended product" warning under full-auto product-cut.
   multiProductPage?: boolean;
+  /**
+   * Model-identified clean standalone product photo among the uploaded materials
+   * ([업로드 원본 자료 목록]의 자료 번호, 1-based). The client uses it as the hero/section
+   * generation reference with top priority — a real product photo beats any crop guessed
+   * out of a detail-page capture.
+   */
+  referenceProductImage?: PdpReferenceProductImage;
+}
+
+export interface PdpReferenceProductImage {
+  /** 1-based index into the uploaded materials list as presented in the analyze prompt. */
+  materialIndex: number;
+  /** 0..1 — how confident the model is that this is a clean, text-free, single-product photo. */
+  confidence: number;
 }
 
 export interface SectionStoryBeat {
@@ -152,6 +166,12 @@ export interface PdpExpandRequest {
     aspectRatio: AspectRatio;
     aiProvider: PdpAiProvider;
     outputMode: PdpOutputMode;
+    /**
+     * Pass-1 transcription of the uploaded long detail page (see PdpTranscribeStripsRequest).
+     * Gives body-copy generation the page's actual copy inventory instead of only the
+     * hero blueprint's 8-line summary.
+     */
+    longPageTranscript?: string;
   };
 }
 
@@ -248,12 +268,49 @@ export interface PdpAnalyzeRequest {
   aspectRatio: AspectRatio;
   sectionCount?: number;
   benefits?: string[];
+  /**
+   * Pass-1 full-text transcription of the long detail page (batched vision reads via
+   * /pdp/transcribe-strips). When present the blueprint is designed from the page's ACTUAL
+   * copy, not from what survives strip downscaling.
+   */
+  longPageTranscript?: string;
+  /**
+   * Skip the server-side hero image generation and return the blueprint with sections[0]
+   * ungenerated. The client sets this when it holds the ORIGINAL upload file, so it can crop
+   * productCutRegion from full-resolution pixels and generate the hero with that reference
+   * instead of a low-res strip crop.
+   */
+  deferHeroGeneration?: boolean;
 }
 
 export interface PdpAnalyzeSuccessResponse {
   ok: true;
   result: GeneratedResult;
 }
+
+/**
+ * Pass-1 of the long-detail-page 2-pass analysis: one batch of strips is transcribed
+ * verbatim (copy inventory + section typing). Batches run sequentially on the client so
+ * each request stays under Vercel's ~4.5MB body limit.
+ */
+export interface PdpTranscribeStripsRequest {
+  aiProvider?: PdpAiProvider;
+  strips: PdpAnalysisStrip[];
+  batchIndex: number;
+  batchCount: number;
+  originalWidth?: number;
+  originalHeight?: number;
+  /** Section type the previous batch ended on, for continuity across batch boundaries. */
+  previousSectionHint?: string;
+}
+
+export interface PdpTranscribeStripsSuccessResponse {
+  ok: true;
+  transcript: string;
+  lastSectionType?: string;
+}
+
+export type PdpTranscribeStripsResponse = PdpTranscribeStripsSuccessResponse | PdpErrorResponse;
 
 export interface PdpAnalyzeCustomerReviewsRequest {
   source: PdpCustomerReviewSource;
