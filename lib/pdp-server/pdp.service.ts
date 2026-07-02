@@ -1749,8 +1749,8 @@ ${storyBrandPrompt}
 - 좋은 예시: 실제 업로드 제품과 타깃 고객의 불편, 욕구, 망설임, 선택 이유가 드러나는 판매 카피.
 - 문제 공감/구매 전 고민 섹션은 특히 고객이 실제로 겪는 상황형 문장이나 질문형 헤드라인으로 작성하세요.
 - 고객 후기 데이터가 제공되었다면 고객 고민/문제/구매 전 고민 섹션은 반복된 아쉬움과 실제 후기 표현을 짧은 고민 문장으로 바꾸고, 후기/리뷰/사용 후 변화 섹션은 실제 입력 후기 샘플을 짧게 다듬어 카드 문장으로 사용하세요.
-- 후기가 장점 위주라면 그 장점을 역으로 문제 제기에 사용하세요. 예: "쿠션감이 좋다"는 후기가 있으면 "착지할 때 발바닥 충격이 신경 쓰이지 않았나요?"처럼 구매 전 불편 질문으로 바꾸고, 다음 섹션에서 그 장점을 해결책으로 연결하세요.
-- 히어로/선택 이유/혜택 카드에서는 후기 근거를 그대로 라벨화하지 마세요. "워터프루프 인정 후기", "백탁 적다는 후기"처럼 어색한 표현은 금지입니다. 반드시 "물과 땀에 강한 워터프루프", "하얗게 뜨지 않는 백탁 방지 효과"처럼 고객이 얻는 혜택 문장으로 바꾸세요.
+- 후기가 장점 위주라면 그 장점을 역으로 문제 제기에 사용하세요. 후기에서 반복된 장점이 "OO"라면 "OO이 아쉬워서 망설인 적 없으신가요?"처럼 구매 전 불편 질문으로 바꾸고, 다음 섹션에서 그 장점을 해결책으로 연결하세요.
+- 히어로/선택 이유/혜택 카드에서는 후기 근거를 그대로 라벨화하지 마세요. "OO 인정 후기", "OO 적다는 후기"처럼 어색한 표현은 금지입니다. 후기 라벨만 떼고 그 장점 OO 자체를 고객이 얻는 혜택 문장으로 다시 쓰세요. 이때 업로드된 제품에서 확인되지 않는 다른 카테고리의 기능이나 혜택(예: 다른 제품군의 기능성 문구)을 새로 만들지 마세요.
 - 모든 visible copy는 섹션 설명문이 아니라 이미지에 그대로 들어가도 어색하지 않은 고객-facing 문장이어야 합니다.
 - 같은 히어로 태그라인이나 구매 유도 문구를 여러 섹션에 반복하지 마세요. 반복 대신 문제, 해결, 사용법, 변화, 손실을 각각 다른 문장으로 전개하세요.
 - "고객이...", "이 섹션은...", "페이지 흐름..."처럼 제작자에게 설명하는 문장은 visible copy에 쓰지 마세요.
@@ -2149,9 +2149,9 @@ ${sampleReviews.map((review, index) => `  ${index + 1}. "${review}"`).join("\n")
 
 고객 후기 데이터 사용 규칙:
 - 전체 섹션 설계에서 후기 데이터의 장점은 더 크게 부각하고, 단점/아쉬움은 "우리가 개선했다/구매 전 먼저 안내한다/선택 실패를 줄인다"는 메시지로 전환하세요.
-- 후기 장점은 히어로/혜택/확신 섹션에서 "후기/리뷰/인정" 라벨로 쓰지 말고 판매 카피로 바꾸세요. 예: "워터프루프 인정 후기" 금지 -> "물과 땀에 강한 워터프루프", "백탁 적다는 후기" 금지 -> "하얗게 뜨지 않는 백탁 방지".
+- 후기 장점은 히어로/혜택/확신 섹션에서 "후기/리뷰/인정" 라벨로 쓰지 말고 판매 카피로 바꾸세요. "OO 인정 후기", "OO 적다는 후기" 같은 표현은 금지하고, 라벨만 뗀 뒤 그 장점 OO을 이 제품의 혜택 문장으로 다시 쓰세요. 이 제품과 무관한 다른 카테고리의 혜택 문구를 가져오면 안 됩니다.
 - 고객 고민, 문제 제기, 구매 전 고민 섹션에는 반복된 단점/아쉬움과 실제 후기 표현을 짧은 말풍선 또는 질문형 문장으로 사용하세요.
-- 단점/아쉬움이 적고 장점만 많다면 장점을 역으로 구매 전 불편 질문으로 바꾸세요. 예: "쫀쫀함이 좋다" -> "러닝 중 양말이 발 안에서 밀리지 않았나요?", "쿠션감이 좋다" -> "착지할 때 발바닥 충격이 신경 쓰이지 않았나요?"
+- 단점/아쉬움이 적고 장점만 많다면 장점을 역으로 구매 전 불편 질문으로 바꾸세요. 후기 장점이 "OO이 좋다"라면 "OO이 부족해서 불편했던 적 없으신가요?"처럼 이 제품의 사용 맥락 안에서 질문으로 바꿉니다.
 - 고객 후기, 리뷰, 사용 후 변화 섹션에는 실제 후기 샘플을 짧게 다듬어 후기 카드 문장으로 사용하세요.
 - 입력 후기에서 확인되지 않은 별점 평균, 인증된 리뷰 수, 100% 리얼 리뷰, 인플루언서명, 과장된 효능/수치/전후 변화는 만들지 마세요.
 `;
@@ -2403,7 +2403,7 @@ function buildFallbackVisibleHeadline(section: SectionBlueprint) {
   const purposeCopy = sanitizeVisibleCopy(section.purpose, section.section_name);
 
   if (role === "disclosure") {
-    return buildProductInfoFallbackCopy(section).headline;
+    return buildProductInfoFallbackCopy().headline;
   }
 
   if (goalCopy && role !== "problem") {
@@ -2446,7 +2446,7 @@ function buildFallbackVisibleSubheadline(section: SectionBlueprint, headline: st
   const concreteCopy = purposeCopy || goalCopy;
 
   if (role === "disclosure") {
-    return buildProductInfoFallbackCopy(section).subheadline;
+    return buildProductInfoFallbackCopy().subheadline;
   }
 
   if (concreteCopy && normalizeVisibleCopyKey(concreteCopy) !== normalizeVisibleCopyKey(headline)) {
@@ -2483,61 +2483,13 @@ function buildFallbackVisibleBullets(section: SectionBlueprint, role: string) {
     return [];
   }
 
-  return buildProductInfoFallbackCopy(section).bullets;
+  return buildProductInfoFallbackCopy().bullets;
 }
 
-function buildProductInfoFallbackCopy(section: SectionBlueprint) {
-  const haystack = [
-    section.section_id,
-    section.section_name,
-    section.goal,
-    section.headline,
-    section.subheadline,
-    ...(section.bullets ?? []),
-    section.trust_or_objection_line,
-    section.purpose,
-    section.prompt_ko,
-    section.prompt_en,
-    section.layout_notes,
-    section.reference_usage
-  ].join(" ").toLowerCase();
-
-  if (/선\s*크림|썬\s*크림|선스크린|sunscreen|sun\s*screen|sun\s*cream|자외선\s*차단|spf|워터\s*프루프|waterproof|물놀이|물에도|땀에도|야외\s*활동|해변|바다/.test(haystack)) {
-    return {
-      headline: "선크림 정보를 확인하세요",
-      subheadline: "SPF/PA 표기, 용기, 사용 루틴을 구매 전 보기 쉽게",
-      bullets: ["SPF/PA 표기", "워터프루프"]
-    };
-  }
-
-  const hasSockTerm = /운동\s*양말|러닝\s*양말|런닝\s*양말|양말|삭스|socks?/.test(haystack);
-  const hasRunningFootTerm =
-    /(러닝|런닝|마라톤|조깅|러너).{0,36}(발바닥|발목|뒤꿈치|발\s|물집|쓸림|양말|삭스|socks?)|((발바닥|발목|뒤꿈치|물집|쓸림|양말|삭스|socks?).{0,36}(러닝|런닝|마라톤|조깅|러너))/.test(haystack);
-
-  if (hasSockTerm || hasRunningFootTerm) {
-    return {
-      headline: "착용 디테일을 확인하세요",
-      subheadline: "쿠션, 밴드, 뒤꿈치 마감처럼 발에 닿는 정보를 한눈에",
-      bullets: ["쿠션감", "발목 마감"]
-    };
-  }
-
-  if (/melide|멜라이드|airmuse|에어뮤즈|patch|패치|햇빛|자외선|\buv\b|야외|외출/.test(haystack)) {
-    return {
-      headline: "패치 형태와 구성을 확인하세요",
-      subheadline: "패치, 패키지, 휴대 구성을 구매 전 한눈에",
-      bullets: ["패치 형태", "패키지 구성"]
-    };
-  }
-
-  if (/세럼|크림|앰플|스킨|로션|피부|뷰티|화장품|마스크|팩|용기|질감/.test(haystack)) {
-    return {
-      headline: "용기와 사용감을 확인하세요",
-      subheadline: "제형, 용기, 루틴 정보를 구매 전 보기 쉽게",
-      bullets: ["제형 정보", "사용 루틴"]
-    };
-  }
-
+// Disclosure-section fallback copy is intentionally category-neutral. Keyword-based
+// category guessing here previously injected sunscreen/sock/patch sample copy (and even
+// third-party brand names) into unrelated products whenever a section's own copy was empty.
+function buildProductInfoFallbackCopy() {
   return {
     headline: "제품 구성과 디테일 체크",
     subheadline: "패키지, 구성품, 사용 전 확인점을 한눈에",
@@ -2671,7 +2623,7 @@ function buildImagePrompt(
           : "",
       "Never render internal section role labels as visible text, such as 문제 공감, 문제 제기, 가이드 제안, 가이드/제품 소개, 전환 선언, 신뢰 근거, 행동 유도, 사용 장면, 사용 후 변화, 놓쳤을 때 손실, 구매 전 고민, or 비교 포인트.",
       "If any provided copy still sounds like an internal planning note, rewrite it into a short customer-facing Korean sales phrase grounded in the product reference and section goal before placing it on the image.",
-      "For hero, value, lifestyle, success, or proof chips, never write review-evidence labels such as 후기, 리뷰, 인정 후기, or 적다는 후기. Convert review evidence into a direct benefit claim, for example 워터프루프 인정 후기 -> 물과 땀에 강한 워터프루프, 백탁 적다는 후기 -> 하얗게 뜨지 않는 백탁 방지.",
+      "For hero, value, lifestyle, success, or proof chips, never write review-evidence labels such as 후기, 리뷰, 인정 후기, or 적다는 후기. Convert review evidence into a direct benefit claim by dropping the review label and keeping the benefit wording itself. Never introduce benefit claims or product-type words that belong to a different product category than the referenced product.",
       options.isRegeneration
         ? "This is an image-mode revision of a complete design: keep the section as a finished ad page and do not erase the on-image marketing text."
         : "",

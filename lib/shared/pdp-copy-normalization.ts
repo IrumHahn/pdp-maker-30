@@ -8,11 +8,14 @@ export function inferPdpCopyProductKind(values: Array<string | null | undefined>
     .join(" ")
     .toLowerCase();
 
-  if (/선\s*크림|썬\s*크림|선스크린|sunscreen|sun\s*screen|spf|pa\+|백탁|워터\s*프루프|waterproof|물놀이|자외선\s*차단/.test(haystack)) {
+  // Category detection must be conservative: only explicit product nouns count.
+  // Broad usage words (물놀이, 워터프루프, spf, 러닝, 조깅 …) appear in copy for many
+  // other products and previously caused cross-category copy contamination.
+  if (/선\s*크림|썬\s*크림|선스크린|sunscreen|sun\s*cream|자외선\s*차단제|선\s*케어|sun\s*care|백탁/.test(haystack)) {
     return "sunCare";
   }
 
-  if (/러닝\s*양말|런닝\s*양말|운동\s*양말|양말|삭스|socks?|러닝|런닝|마라톤|조깅/.test(haystack)) {
+  if (/러닝\s*양말|런닝\s*양말|운동\s*양말|양말|삭스|socks?/.test(haystack)) {
     return "runningSocks";
   }
 
@@ -72,24 +75,30 @@ export function containsPdpReviewEvidenceWording(value?: string) {
 function mapReviewBenefitToSalesCopy(value: string, productKind: PdpCopyProductKind) {
   const haystack = value.toLowerCase();
 
-  if (/백탁|하얗게\s*뜸|하얗게\s*뜨|white\s*cast/.test(haystack)) {
-    return "하얗게 뜨지 않는 백탁 방지";
-  }
+  // Category-specific rewrites run ONLY when the product kind was explicitly
+  // detected. For "generic" products we never substitute another category's
+  // benefit claims (지속/가벼/간편 … are near-universal marketing words and used
+  // to trigger sunscreen copy on unrelated products).
+  if (productKind === "sunCare") {
+    if (/백탁|하얗게\s*뜸|하얗게\s*뜨|white\s*cast/.test(haystack)) {
+      return "하얗게 뜨지 않는 백탁 방지";
+    }
 
-  if (/워터\s*프루프|water\s*proof|waterproof|방수|물에도|물놀이|물과\s*땀|땀에도|지워지|쉽게\s*안\s*지워|지속/.test(haystack)) {
-    return "물과 땀에 강한 워터프루프";
-  }
+    if (/워터\s*프루프|water\s*proof|waterproof|방수|물에도|물놀이|물과\s*땀|땀에도|지워지|쉽게\s*안\s*지워/.test(haystack)) {
+      return "물과 땀에 강한 워터프루프";
+    }
 
-  if (/끈적|산뜻|보송|번들|흡수|가벼|부드럽|발림/.test(haystack)) {
-    return "끈적임 적은 산뜻한 사용감";
-  }
+    if (/끈적|산뜻|보송|번들|흡수|발림/.test(haystack)) {
+      return "끈적임 적은 산뜻한 사용감";
+    }
 
-  if (/자외선|차단|햇빛|spf|pa\+/.test(haystack)) {
-    return "햇빛 강한 날 챙기는 차단 루틴";
-  }
+    if (/자외선|차단|햇빛|spf|pa\+/.test(haystack)) {
+      return "햇빛 강한 날 챙기는 차단 루틴";
+    }
 
-  if (/휴대|간편|챙|파우치|작고|가방/.test(haystack)) {
-    return "야외 활동 전 간편한 휴대";
+    if (/휴대|간편|파우치|작고|가방/.test(haystack)) {
+      return "야외 활동 전 간편한 휴대";
+    }
   }
 
   if (productKind === "runningSocks") {

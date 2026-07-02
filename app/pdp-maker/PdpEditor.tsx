@@ -2221,60 +2221,11 @@ export function PdpEditor({
     isExpandingRef.current = true;
     setIsExpanding(true);
 
-    // Fallback: the original client-side template engine, kept so expansion always
-    // produces sections even if the /pdp/expand LLM call fails or times out.
-    const buildFallbackExpandedSections = () =>
-      selectedExpansionStrategy.sections.map((strategySection, index) => {
-        const sectionCopy = buildExpansionSectionCopy({
-          heroSection,
-          sectionId: strategySection.id,
-          sectionName: strategySection.name,
-          goal: strategySection.intent,
-          strategyTitle: selectedExpansionStrategy.title,
-          sectionIndex: index + 2,
-          totalSections: selectedExpansionStrategy.sections.length + 1,
-          isLastSection: index === selectedExpansionStrategy.sections.length - 1,
-          additionalInfo,
-          blueprintSummary: initialResult.blueprint.executiveSummary,
-          blueprintList: initialResult.blueprint.blueprintList,
-          customerReviewAnalysis
-        });
-        const usesReviewData = Boolean(
-          customerReviewAnalysis &&
-            /후기|리뷰|고민|Concern|Review|Success|Proof|Evidence/i.test(`${strategySection.id} ${strategySection.name}`)
-        );
-        const reviewDataNote = usesReviewData
-          ? `입력된 후기 ${customerReviewAnalysis?.reviewCount ?? 0}건에서 반복된 장점(${customerReviewAnalysis?.topBenefits.slice(0, 3).join(" / ") || "만족 포인트"})과 아쉬움(${(customerReviewAnalysis?.improvementPromises.length ? customerReviewAnalysis.improvementPromises : customerReviewAnalysis?.painPoints ?? []).slice(0, 3).join(" / ") || "구매 전 불안"})을 반영합니다.`
-          : "";
-
-        return normalizeSectionCopyFields({
-          section_id: strategySection.id,
-          section_name: strategySection.name,
-          goal: sectionCopy.goal,
-          headline: sectionCopy.headline,
-          headline_en: sectionCopy.headline_en,
-          subheadline: sectionCopy.subheadline,
-          subheadline_en: sectionCopy.subheadline_en,
-          bullets: sectionCopy.bullets,
-          bullets_en: sectionCopy.bullets_en,
-          trust_or_objection_line: sectionCopy.trust_or_objection_line,
-          trust_or_objection_line_en: sectionCopy.trust_or_objection_line_en,
-          CTA: sectionCopy.CTA,
-          CTA_en: sectionCopy.CTA_en,
-          layout_notes: sectionCopy.layout_notes,
-          compliance_notes: `근거 없는 효능, 인증, 리뷰, 수치 표현 금지${reviewDataNote ? `. ${reviewDataNote}` : ""}`,
-          image_id: `IMG_${strategySection.id}`,
-          purpose: sectionCopy.purpose,
-          prompt_ko: sectionCopy.prompt_ko,
-          prompt_en: sectionCopy.prompt_en,
-          negative_prompt: "작은 글씨, 복잡한 배경, 근거 없는 효과, 새 브랜드명, 새 인증, 워터마크",
-          style_guide: `차분하고 선명한 커머스 상세페이지 스타일, 큰 정보 위계, 명확한 여백${reviewDataNote ? `. ${reviewDataNote}` : ""}`,
-          reference_usage: "히어로우와 원본 제품 이미지의 형태, 색감, 패키지, 재질을 유지합니다."
-        });
-      });
-
-    let expandedSections: SectionBlueprint[];
-    let usedFallback = false;
+    // No silent client-template fallback here anymore: it used to replace every non-hero
+    // section with keyword-guessed sample copy when /pdp/expand failed, which is how
+    // another product's template text ended up mixed into user pages. Expansion failure
+    // is now surfaced to the user with a retry path instead.
+    let expandedSections: SectionBlueprint[] = [];
 
     setNotice(`${selectedExpansionStrategy.title} 흐름으로 전체 섹션 카피를 설계하는 중입니다...`);
 
@@ -2335,17 +2286,19 @@ export function PdpEditor({
         throughline: response.narrativeSpine?.throughline?.slice(0, 80)
       });
     } catch (error) {
-      usedFallback = true;
-      expandedSections = buildFallbackExpandedSections();
-      setNotice("AI 확장에 실패해 기본 템플릿으로 구성했어요. 카피는 편집기에서 직접 다듬을 수 있어요.");
+      const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
+      setNotice(
+        `AI 전체 섹션 생성에 실패했습니다 (${reason}). 기존 섹션은 그대로 두었어요. 네트워크와 API 키를 확인한 뒤 '전체 섹션 생성'을 다시 눌러주세요.`
+      );
       logEditorEvent(
-        "editor.expansion_fallback_used",
+        "editor.expansion_failed",
         {
           strategyId: selectedExpansionStrategy.id,
-          reason: error instanceof Error ? error.message.split("\n")[0] : String(error)
+          reason
         },
-        "warn"
+        "error"
       );
+      return;
     } finally {
       isExpandingRef.current = false;
       setIsExpanding(false);
@@ -2361,16 +2314,13 @@ export function PdpEditor({
     setCurrentSectionIndex(1);
     setSelectedOverlayId(null);
     setWorkbenchTab("image");
-    if (!usedFallback) {
-      setNotice(
-        `${selectedExpansionStrategy.title} 흐름으로 ${expandedSections.length}개 섹션을 만들었습니다. 나머지 섹션 이미지를 한 번에 생성합니다.`
-      );
-    }
+    setNotice(
+      `${selectedExpansionStrategy.title} 흐름으로 ${expandedSections.length}개 섹션을 만들었습니다. 나머지 섹션 이미지를 한 번에 생성합니다.`
+    );
     logEditorEvent("editor.expansion_strategy_applied", {
       strategyId: selectedExpansionStrategy.id,
       strategyTitle: selectedExpansionStrategy.title,
       addedSectionCount: expandedSections.length,
-      usedFallback,
       nextSectionCount: nextSections.length
     });
     void generateMissingImagesForSections(nextSections);
@@ -5675,7 +5625,11 @@ type ExpansionCopyRole =
   | "generic";
 
 type SalesNarrativeContext = {
-  category: "sunPatch" | "sunCare" | "beauty" | "runningSocks" | "generic";
+  // Category-specific hardcoded copy decks were removed on 2026-07-02: keyword-based
+  // category guessing kept injecting another product's sample copy (sunscreen, socks,
+  // sun patch, beauty) into user output. Narrative context is now always derived from
+  // the user's own copy/blueprint, so the only category is "generic".
+  category: "generic";
   productRef: string;
   productName: string;
   heroPromise: string;
@@ -5898,98 +5852,12 @@ function buildSalesNarrativeContext(input: ExpansionSectionCopyInput, copyPool: 
     input.blueprintSummary ?? "",
     ...(input.blueprintList ?? [])
   ].flatMap(splitCopyFragments).map((value) => sanitizeCustomerCopy(value)).filter(Boolean));
-  const haystack = allCopy.join(" ").toLowerCase();
   const productName = inferProductName(allCopy);
   const heroPromise = sanitizeCustomerCopy(input.heroSection.headline) || allCopy[0] || "필요한 순간을 더 가볍게";
 
-  if (/선\s*크림|썬\s*크림|선스크린|sunscreen|sun\s*screen|sun\s*cream|자외선\s*차단|spf|워터\s*프루프|waterproof|물놀이|물에도|땀에도|야외\s*활동|해변|바다/.test(haystack)) {
-    const resolvedProductName = productName || "워터프루프 선크림";
-
-    return {
-      category: "sunCare",
-      productRef: "선크림",
-      productName: resolvedProductName,
-      heroPromise,
-      customerPain: "물놀이와 야외 활동 앞에서는 땀과 물에 선크림이 쉽게 지워질까 먼저 신경 쓰입니다.",
-      solutionLine: `${resolvedProductName}는 물놀이와 야외 활동 전 챙기기 좋은 워터프루프 선크림입니다.`,
-      planSteps: ["외출 전 바르기", "물놀이·운동 전 챙기기", "필요한 순간 덧바르기"],
-      successLine: "준비가 분명해지면 선크림 걱정보다 오늘 활동에 더 집중하게 됩니다.",
-      failureLine: "준비 없이 나가면 땀, 물, 강한 햇빛 앞에서 같은 불안이 다시 남습니다.",
-      ctaLine: "야외 활동 전, 선크림부터 챙기세요",
-      proofLine: "패키지에 보이는 SPF/PA 표기와 워터프루프 사용 맥락을 구매 전 확인하세요.",
-      detailLine: "용기, 제형, 패키지 표기처럼 바르기 전 궁금한 정보를 가까이에서 확인하세요.",
-      compositionLine: "휴대하기 쉬운 선크림 구성과 사용 전 확인 포인트를 한 번에 확인하세요.",
-      supportBullets: ["물과 땀 앞에서도 챙기는 루틴", "야외 활동 전 바르는 선크림", "패키지에서 확인하는 SPF/PA"]
-    };
-  }
-
-  const hasSockTerm = /운동\s*양말|러닝\s*양말|런닝\s*양말|양말|삭스|socks?/.test(haystack);
-  const hasRunningFootTerm =
-    /(러닝|런닝|마라톤|조깅|러너).{0,36}(발바닥|발목|뒤꿈치|발\s|물집|쓸림|양말|삭스|socks?)|((발바닥|발목|뒤꿈치|물집|쓸림|양말|삭스|socks?).{0,36}(러닝|런닝|마라톤|조깅|러너))/.test(haystack);
-
-  if (hasSockTerm || hasRunningFootTerm) {
-    const resolvedProductName = productName || "러닝 양말";
-
-    return {
-      category: "runningSocks",
-      productRef: "러닝 양말",
-      productName: resolvedProductName,
-      heroPromise,
-      customerPain: "러닝 중 양말이 발 안에서 밀리거나, 땀과 마찰로 발바닥·뒤꿈치가 신경 쓰이면 페이스가 먼저 흔들립니다.",
-      solutionLine: `${resolvedProductName}는 쫀쫀한 핏과 도톰한 쿠션감으로 발을 안정적으로 잡고 착지 충격과 마찰 부담을 덜어주는 러닝 양말입니다.`,
-      planSteps: ["발을 쫀쫀하게 잡기", "발바닥 쿠션으로 받쳐주기", "러닝 내내 덜 신경 쓰이게"],
-      successLine: "뛰는 동안 양말 신경을 덜 쓰면 보폭, 페이스, 훈련 집중에 더 마음이 갑니다.",
-      failureLine: "낡거나 얇은 일반 양말로 계속 뛰면 밀림, 쓸림, 물집, 발 피로 때문에 페이스와 기록 관리가 흔들릴 수 있습니다.",
-      ctaLine: "다음 러닝 전, 발을 먼저 챙길 양말을 준비하세요",
-      proofLine: "쫀쫀한 핏, 도톰한 쿠션감, 발목과 뒤꿈치 마감을 구매 전 확인하세요.",
-      detailLine: "발바닥 쿠션, 발목 밴드, 뒤꿈치 마감처럼 뛰는 동안 체감되는 디테일을 확인하세요.",
-      compositionLine: "러닝 전 바로 신기 좋은 양말 구성과 두께감을 한 번에 확인하세요.",
-      supportBullets: ["발을 잡아주는 쫀쫀한 핏", "착지 부담을 덜어주는 쿠션감", "땀과 마찰이 신경 쓰이는 러닝 순간"]
-    };
-  }
-
-  if (/sun\s*patch|선\s*패치|썬\s*패치|햇빛|자외선|\buv\b|야외|외출/.test(haystack)) {
-    const resolvedProductName = productName || "THE PANOL REAL SUN PATCH 2.0";
-
-    return {
-      category: "sunPatch",
-      productRef: "선 패치",
-      productName: resolvedProductName,
-      heroPromise,
-      customerPain: "덧바르기는 번거롭고, 그냥 나가자니 햇빛이 먼저 신경 쓰입니다.",
-      solutionLine: `${resolvedProductName}는 외출 전 필요한 부위에 붙여 쓰는 데일리 선 패치입니다.`,
-      planSteps: ["외출 전 꺼내기", "필요한 부위에 붙이기", "가볍게 나가기"],
-      successLine: "준비가 간단해지면 햇빛 걱정보다 오늘 일정에 더 집중하게 됩니다.",
-      failureLine: "그냥 나가면 햇빛이 강한 순간마다 같은 불안이 다시 떠오릅니다.",
-      ctaLine: "오늘 외출 전, 한 장 챙기세요",
-      proofLine: "패치와 패키지 구성을 눈으로 확인하고 선택하세요.",
-      detailLine: "얇고 부드러운 패치 형태를 가까이에서 확인하세요.",
-      compositionLine: "패치 구성과 휴대하기 쉬운 패키지를 함께 확인하세요.",
-      supportBullets: ["야외 활동 전 간편 부착", "얼굴에 붙이는 선 패치", "가볍게 챙기는 데일리 아이템"]
-    };
-  }
-
-  if (/세럼|크림|앰플|스킨|로션|피부|뷰티|화장품|마스크|팩/.test(haystack)) {
-    const resolvedProductRef = productName || "스킨케어 제품";
-
-    return {
-      category: "beauty",
-      productRef: resolvedProductRef,
-      productName: resolvedProductRef,
-      heroPromise,
-      customerPain: "좋아 보이는 제품은 많지만, 내 피부에 맞을지 몰라 선택 앞에서 망설여집니다.",
-      solutionLine: `${resolvedProductRef}는 사용 전 궁금한 질감과 루틴을 한눈에 확인하게 해줍니다.`,
-      planSteps: ["필요한 순간 확인", "루틴에 맞게 사용", "변화를 기록하기"],
-      successLine: "구매 후에는 복잡한 고민보다 매일의 관리 루틴이 먼저 떠오릅니다.",
-      failureLine: "확신 없이 고르면 피부 고민과 선택 피로가 계속 이어질 수 있습니다.",
-      ctaLine: "오늘의 루틴에 맞는지 확인하세요",
-      proofLine: "원본에서 확인되는 구성과 질감 중심으로 선택 기준을 세웁니다.",
-      detailLine: "질감, 용기, 사용감을 가까이에서 확인하세요.",
-      compositionLine: "구성, 용량, 사용 순서를 구매 전 한 번에 확인하세요.",
-      supportBullets: ["피부 고민에 맞춘 루틴", "눈으로 확인하는 질감", "매일 쓰기 쉬운 구성"]
-    };
-  }
-
+  // No keyword-based category decks here anymore. Every product gets the neutral
+  // narrative derived from its own copy pool; product-specific claims must come from
+  // the user's data (hero copy, blueprint, reviews), never from a built-in sample.
   const resolvedProductRef = productName || "이 제품";
 
   return {
@@ -6229,27 +6097,19 @@ function buildRoleFallbackCopy(
   isFinalBeat = false,
   customerReviewAnalysis?: PdpCustomerReviewAnalysis | null
 ) {
-  const isSunPatch = context.category === "sunPatch";
-  const isSunCare = context.category === "sunCare";
-  const isRunningSocks = context.category === "runningSocks";
   const productLabel = context.productRef === "이 제품" ? "이 제품" : context.productRef;
   const productNameLabel = context.productName || productLabel;
   const planLine = context.planSteps.join(" · ");
   const reviewSamples = normalizeCustomerReviewCopyList(customerReviewAnalysis?.sampleReviews, 4, 64);
-  const reviewBenefits = normalizePdpReviewBenefitSalesCopyList(
-    customerReviewAnalysis?.topBenefits,
-    context.category === "sunCare" || context.category === "runningSocks" ? context.category : "generic",
-    4,
-    58
-  );
+  const reviewBenefits = normalizePdpReviewBenefitSalesCopyList(customerReviewAnalysis?.topBenefits, "generic", 4, 58);
   const reviewPainPoints = normalizeCustomerReviewCopyList(customerReviewAnalysis?.painPoints, 5, 58);
   const reviewImprovements = normalizeCustomerReviewCopyList(customerReviewAnalysis?.improvementPromises, 4, 68);
-  const reviewBackedConcerns = buildReviewBackedConcernLines(reviewBenefits, context);
+  const reviewBackedConcerns = buildReviewBackedConcernLines(reviewBenefits);
   const reviewBenefitSummary = reviewBenefits.slice(0, 2).join(" · ");
 
   const copyByRole = {
     hero: {
-      headline: context.heroPromise || (isSunPatch ? "외출 전 루틴을 더 가볍게" : isSunCare ? "야외 활동 전, 더 든든하게" : `${productLabel}, 선택이 쉬워지는 순간`),
+      headline: context.heroPromise || `${productLabel}, 선택이 쉬워지는 순간`,
       headline_en: "A clear first promise",
       subheadline: context.solutionLine,
       subheadline_en: "Restate the main promise as a strong opening scene.",
@@ -6260,13 +6120,7 @@ function buildRoleFallbackCopy(
       storyBeat: "제품의 핵심 약속을 첫 화면처럼 다시 고정하는 장면"
     },
     question: {
-      headline: isSunPatch
-        ? "외출 전, 햇빛이 먼저 신경 쓰이나요?"
-        : isSunCare
-          ? "물놀이 전, 선크림이 먼저 걱정되나요?"
-        : isRunningSocks
-          ? "뛰는 동안 발이 먼저 신경 쓰이나요?"
-          : "이런 불편, 매번 참아야 할까요?",
+      headline: "이런 불편, 매번 참아야 할까요?",
       headline_en: "Have you felt this before?",
       subheadline: context.customerPain,
       subheadline_en: "Open with a question that makes the customer recognize their own situation.",
@@ -6285,14 +6139,10 @@ function buildRoleFallbackCopy(
           ? "구매 전 고객이 속으로 묻는 고민을 먼저 보여줍니다."
           : `${productLabel} 구매 전 고객이 속으로 묻는 고민을 먼저 보여줍니다.`,
       subheadline_en: "List the customer's pre-purchase doubts as short chat bubbles.",
-      bullets: reviewPainPoints.length ? reviewPainPoints : reviewBackedConcerns.length ? reviewBackedConcerns : isSunPatch
-        ? ["돈만 쓰고 제대로 쓸지 모르겠어요", "붙였을 때 티가 많이 날까 봐 걱정돼요", "야외에서 정말 챙기게 될까요?", "다른 제품과 뭐가 다른지 모르겠어요", "가격만큼 필요한지 망설여져요"]
-        : isSunCare
-          ? ["물놀이 중 쉽게 지워지면 어떡하죠?", "땀 때문에 금방 무너지지 않을까요?", "끈적이면 계속 바르기 싫을 것 같아요", "야외 활동 전에 정말 챙기게 될까요?", "SPF/PA 표기를 믿고 선택해도 될까요?"]
-        : isRunningSocks
-          ? ["뛰다가 양말이 밀리면 어떡하죠?", "쿠션감이 부족해서 발바닥이 아프지 않을까요?", "땀이 차고 쓸리면 오래 못 뛰지 않을까요?", "기록이 떨어지는 이유가 양말이면 어떡하죠?", "일반 양말과 뭐가 다른지 모르겠어요"]
-        : context.category === "beauty"
-          ? ["진짜 효과가 있을지 믿음이 안 가요", "부작용이 무서워서 못 쓰겠어요", "방법을 몰라 꾸준히 안 쓰게 되더라고요", "기능 별로 다 사려니 너무 비싸요", "가격 차이가 커서 못 고르겠어요"]
+      bullets: reviewPainPoints.length
+        ? reviewPainPoints
+        : reviewBackedConcerns.length
+          ? reviewBackedConcerns
           : ["정말 나에게 필요한지 모르겠어요", "써보고 후회하면 어떡하죠?", "가격만큼 만족할지 걱정돼요", "비슷한 제품이 많아 못 고르겠어요", "꾸준히 쓸 수 있을지 모르겠어요"],
       bullets_en: ["Will it really work?", "What if it does not fit me?", "Can I keep using it?", "Why is the price so different?", "How do I choose?"],
       trustLine: reviewImprovements[0] ?? "고객이 망설이는 말을 먼저 듣고, 다음 섹션에서 답을 제시하세요.",
@@ -6300,13 +6150,7 @@ function buildRoleFallbackCopy(
       storyBeat: "고객의 구매 전 고민을 채팅 말풍선으로 미리 들려주는 장면"
     },
     problem: {
-      headline: isSunPatch
-        ? "햇빛은 기다려주지 않으니까"
-        : isSunCare
-          ? "땀과 물 앞에서도 준비가 필요하니까"
-        : isRunningSocks
-          ? "러닝 중, 양말이 먼저 불편하지 않았나요?"
-          : "구매 직전 망설임이 남는 이유",
+      headline: "구매 직전 망설임이 남는 이유",
       headline_en: "When hesitation begins",
       subheadline: context.customerPain,
       subheadline_en: "Start from the customer's real hesitation and reveal why this choice matters.",
@@ -6314,20 +6158,14 @@ function buildRoleFallbackCopy(
         ? reviewPainPoints
         : reviewBackedConcerns.length
           ? reviewBackedConcerns
-      : isSunPatch
-        ? ["덧바르는 타이밍을 놓치는 날", "야외 일정 전 손이 바쁜 순간", "그냥 나가긴 불안한 햇빛"]
-        : isSunCare
-          ? ["물놀이 앞에서 신경 쓰이는 지속감", "땀과 물 때문에 남는 걱정", "강한 햇빛 전 필요한 준비"]
-        : isRunningSocks
-          ? ["발 안에서 밀리는 양말", "착지마다 느껴지는 발바닥 충격", "땀과 마찰로 신경 쓰이는 발"]
-        : ["반복되는 불편", "구매 전 남는 망설임", "나에게 맞을지 모르는 불안"],
+          : ["반복되는 불편", "구매 전 남는 망설임", "나에게 맞을지 모르는 불안"],
       bullets_en: ["The repeated pain", "The purchase hesitation", "The unresolved concern"],
       trustLine: context.failureLine,
       CTA: "",
       storyBeat: "고객의 문제를 크게 꺼내는 장면"
     },
     bridge: {
-      headline: isSunPatch ? "그래서 준비를 더 간단하게" : isSunCare ? "그래서 야외 루틴을 더 든든하게" : "그래서 기준을 더 분명하게",
+      headline: "그래서 기준을 더 분명하게",
       headline_en: "So we fixed it",
       subheadline: context.solutionLine,
       subheadline_en: "Move from empathy into a clear promise of improvement.",
@@ -6338,30 +6176,18 @@ function buildRoleFallbackCopy(
       storyBeat: "문제에서 해결책으로 장면이 전환되는 순간"
     },
     guide: {
-      headline: isSunPatch
-        ? "외출 전, 한 장으로 더 간단하게"
-        : isSunCare
-          ? "물과 땀 앞에서도 챙기는 선크림"
-        : isRunningSocks
-          ? "쫀쫀한 핏과 쿠션감으로 발을 잡아줍니다"
-          : `${productLabel}가 해결책이 되는 이유`,
+      headline: `${productLabel}가 해결책이 되는 이유`,
       headline_en: "A simple guide to the solution",
       subheadline: context.solutionLine,
       subheadline_en: "Introduce the product as the guide that reduces the customer's problem.",
-      bullets: isSunPatch
-        ? [productNameLabel, "필요한 부위에 붙여 쓰는 방식", "가방에 가볍게 챙기는 구성"]
-        : isSunCare
-          ? [productNameLabel, "물놀이 전 바르는 루틴", "패키지에서 확인하는 SPF/PA"]
-        : isRunningSocks
-          ? ["러닝 중 발을 잡아주는 핏", "착지를 받쳐주는 쿠션감", "쓸림과 피로를 줄이는 선택"]
-        : [productNameLabel, context.detailLine, context.compositionLine],
+      bullets: [productNameLabel, context.detailLine, context.compositionLine],
       bullets_en: ["Product role", "How it helps", "Why it is easy to choose"],
       trustLine: context.proofLine,
       CTA: "",
       storyBeat: "가이드가 등장해 제품을 해결책으로 제시하는 장면"
     },
     value: {
-      headline: isSunPatch ? "붙이는 방식이라 더 가볍게" : isSunCare ? "야외 활동 전 선택 이유가 분명해집니다" : "선택 이유가 분명해집니다",
+      headline: "선택 이유가 분명해집니다",
       headline_en: "A clearer reason to choose",
       subheadline: context.solutionLine,
       subheadline_en: "Move beyond looking nice and make the core reason easy to understand.",
@@ -6372,21 +6198,9 @@ function buildRoleFallbackCopy(
       storyBeat: "제품 장점이 고객의 문제와 연결되는 장면"
     },
     plan: {
-      headline: isSunPatch
-        ? "꺼내고, 붙이고, 나가면 끝"
-        : isSunCare
-          ? "바르고, 챙기고, 필요할 때 덧바르게"
-        : isRunningSocks
-          ? "잡아주고, 받쳐주고, 덜 신경 쓰이게"
-          : "받고 나서 바로 쓰는 간단한 순서",
+      headline: "받고 나서 바로 쓰는 간단한 순서",
       headline_en: "Easy from the first moment",
-      subheadline: isSunPatch
-        ? "오래 준비하지 않아도 야외 활동 전 루틴이 짧아집니다."
-        : isSunCare
-          ? "외출 전 바르고 물놀이·운동 중 필요한 타이밍에 다시 챙기는 루틴이 분명해집니다."
-        : isRunningSocks
-          ? "쫀쫀한 핏은 발을 잡아주고, 쿠션감은 착지 부담을 덜어 러닝에 더 집중하게 만듭니다."
-        : `${planLine}으로 구매 후 사용 장면이 바로 그려집니다.`,
+      subheadline: `${planLine}으로 구매 후 사용 장면이 바로 그려집니다.`,
       subheadline_en: "Lower the usage barrier and make the after-purchase moment easy to imagine.",
       bullets: context.planSteps,
       bullets_en: ["Step one", "Step two", "Step three"],
@@ -6395,7 +6209,7 @@ function buildRoleFallbackCopy(
       storyBeat: "어떻게 해결되는지 구체적으로 보여주는 장면"
     },
     proof: {
-      headline: isSunPatch ? "눈으로 확인하고 붙이세요" : isSunCare ? "SPF/PA와 패키지를 확인하세요" : "확인 가능한 정보로 더 안심하게",
+      headline: "확인 가능한 정보로 더 안심하게",
       headline_en: "Confidence from visible proof",
       subheadline: context.proofLine,
       subheadline_en: "Build trust only from details that are visible in the reference.",
@@ -6406,19 +6220,11 @@ function buildRoleFallbackCopy(
       storyBeat: "근거와 확인 정보로 불안을 낮추는 장면"
     },
     compare: {
-      headline: isSunPatch ? "덧바르기 번거로운 날이라면" : isSunCare ? "물과 땀이 신경 쓰이는 날이라면" : "비교할수록 기준은 단순해집니다",
+      headline: "비교할수록 기준은 단순해집니다",
       headline_en: "A clearer standard when compared",
-      subheadline: isSunPatch
-        ? "손이 바쁜 외출 전에는 붙이는 준비가 더 편하게 느껴질 수 있습니다."
-        : isSunCare
-          ? "야외 활동 전에는 사용감, 지속감, 패키지 표기를 함께 보고 고르는 편이 안심됩니다."
-        : "여러 선택지 사이에서도 무엇을 보고 고르면 되는지 분명해집니다.",
+      subheadline: "여러 선택지 사이에서도 무엇을 보고 고르면 되는지 분명해집니다.",
       subheadline_en: "Give shoppers a standard that holds up against alternatives.",
-      bullets: isSunPatch
-        ? ["덧바르는 번거로움", "붙이는 간편함", "외출 전 휴대성"]
-        : isSunCare
-          ? ["땀과 물 앞의 지속감", "바르기 쉬운 사용감", "SPF/PA 패키지 표기"]
-        : ["헷갈리는 대안", "보이는 차이", "후회를 줄이는 기준"],
+      bullets: ["헷갈리는 대안", "보이는 차이", "후회를 줄이는 기준"],
       bullets_en: ["A standard that reduces confusing alternatives", "Compare by visible differences", "Points that reduce regret"],
       trustLine: context.proofLine,
       CTA: "",
@@ -6436,47 +6242,23 @@ function buildRoleFallbackCopy(
       storyBeat: "구매자가 확대해서 보고 싶은 디테일을 확인하는 장면"
     },
     lifestyle: {
-      headline: isSunPatch
-        ? "야외 일정 앞에서도 준비는 가볍게"
-        : isSunCare
-          ? "물놀이 앞에서도 준비는 간단하게"
-        : isRunningSocks
-          ? "러닝 중 발이 편해야 흐름이 이어집니다"
-          : "사용 장면에서 자연스럽게 이해되는 제품",
+      headline: "사용 장면에서 자연스럽게 이해되는 제품",
       headline_en: "A scene that fits real life",
       subheadline: context.successLine,
       subheadline_en: "Help customers imagine the moment after purchase.",
-      bullets: context.category === "sunPatch"
-        ? ["가방 속에 가볍게", "야외 일정 전 빠르게", "햇빛 걱정은 덜어내고"]
-        : isSunCare
-          ? ["외출 전 가볍게 바르기", "물놀이·운동 전 챙기기", "햇빛 걱정보다 활동에 집중"]
-        : isRunningSocks
-          ? ["발을 잡아주는 핏", "착지를 받치는 쿠션감", "러닝 흐름을 방해하지 않게"]
-        : ["사용 상황을 한눈에", "제품이 놓일 생활 맥락", "과장 없는 만족 장면"],
+      bullets: ["사용 상황을 한눈에", "제품이 놓일 생활 맥락", "과장 없는 만족 장면"],
       bullets_en: ["A clear usage moment", "The context where the product belongs", "A grounded satisfaction scene"],
       trustLine: context.proofLine,
       CTA: "",
       storyBeat: "구매 후 생활 장면을 상상하게 만드는 장면"
     },
     success: {
-      headline: isSunPatch
-        ? "햇빛 걱정보다 오늘 일정에 집중하세요"
-        : isSunCare
-          ? "햇빛 걱정보다 오늘 활동에 집중하세요"
-        : isRunningSocks
-          ? "양말 대신 페이스에 집중하세요"
-          : "사용 후 달라지는 장면을 구체적으로",
+      headline: "사용 후 달라지는 장면을 구체적으로",
       headline_en: "The after-purchase change",
       subheadline: context.successLine,
       subheadline_en: "Show the positive change after use through review-like messages.",
       bullets: reviewBenefits.length
         ? reviewBenefits
-        : isSunPatch
-        ? ["붙이는 준비라 루틴이 짧아져요", "작고 가벼워 챙기기 쉬워요", "야외 일정 전 손이 가요"]
-        : isSunCare
-          ? ["물놀이 전 챙기기 쉬워요", "땀나는 날에도 루틴이 분명해요", "야외 활동 전에 손이 가요"]
-        : isRunningSocks
-          ? ["발 밀림 걱정이 줄어요", "착지 충격이 덜 신경 쓰여요", "러닝 페이스에 더 집중해요"]
         : ["사용 전 망설임이 줄어요", "필요한 순간 바로 떠올라요", "일상에서 자연스럽게 쓰여요"],
       bullets_en: ["Review-style change", "Easy to carry", "A moment after use"],
       trustLine: context.proofLine,
@@ -6488,20 +6270,10 @@ function buildRoleFallbackCopy(
       headline_en: "Real customer-style testimonials",
       subheadline: reviewBenefitSummary
         ? reviewBenefitSummary
-        : isSunPatch
-        ? "외출 전 준비가 간단해졌다는 사용 후기를 카드로 정리합니다."
-        : isSunCare
-          ? "야외 활동 전 챙기기 좋다는 사용 후기를 카드로 정리합니다."
-        : isRunningSocks
-          ? "쫀쫀함과 쿠션감을 체감한 러너의 만족 포인트를 후기 카드로 정리합니다."
         : `${productLabel}를 사용한 뒤 느낀 만족 포인트를 고객의 말투로 정리합니다.`,
       subheadline_en: "Summarize post-use satisfaction in testimonial cards.",
-      bullets: reviewSamples.length ? reviewSamples : isSunPatch
-        ? ["외출 전 챙기기 쉬웠어요", "붙이는 방식이라 준비가 빨라졌어요", "작고 가벼워 가방에 넣기 좋았어요", "패키지 구성이 보여 고르기 쉬웠어요"]
-        : isSunCare
-          ? ["물놀이 갈 때 챙기기 좋았어요", "땀나는 날에도 다시 바르기 쉬웠어요", "패키지 표기가 보여 고르기 쉬웠어요", "야외 활동 전에 손이 갔어요"]
-        : isRunningSocks
-          ? ["뛰는 동안 덜 밀려요", "발바닥 쿠션감이 좋아요", "쫀쫀해서 안정감이 있어요", "다음 러닝에도 신고 싶어요"]
+      bullets: reviewSamples.length
+        ? reviewSamples
         : ["생각보다 쓰기 쉬웠어요", "구매 전 고민이 줄었어요", "매일 쓰기 부담이 적었어요", "주변에도 추천하게 됐어요"],
       bullets_en: ["Easy to use", "Reduced hesitation", "Comfortable in daily use", "Worth recommending"],
       trustLine: customerReviewAnalysis?.reviewCount
@@ -6533,27 +6305,11 @@ function buildRoleFallbackCopy(
       storyBeat: "구매 전 확인 정보를 정리하는 장면"
     },
     cta: {
-      headline: isFinalBeat
-        ? (isSunPatch
-            ? "외출 전 루틴을 더 가볍게"
-            : isSunCare
-              ? "야외 활동 전, 선크림부터 챙기세요"
-            : isRunningSocks
-              ? "다음 러닝 전, 양말부터 바꾸세요"
-              : "지금 선택해야 하는 이유")
-        : context.ctaLine,
+      headline: isFinalBeat ? "지금 선택해야 하는 이유" : context.ctaLine,
       headline_en: "One last reason to choose now",
       subheadline: isFinalBeat
-        ? (isSunPatch
-            ? `${productNameLabel}로 외출 전 루틴을 가볍게 바꿔보세요.`
-            : isSunCare
-              ? `${productNameLabel}로 물놀이와 야외 활동 전 루틴을 더 분명하게 준비하세요.`
-            : isRunningSocks
-              ? "쫀쫀한 핏과 쿠션감이 필요한 러너라면, 발이 먼저 편해야 기록도 흔들리지 않습니다."
-              : `${productLabel}로 같은 불편을 다시 미루지 마세요.`)
-        : isRunningSocks
-          ? "지금 신는 양말이 러닝을 방해한다면, 바꿔야 할 이유는 충분합니다."
-          : "바로 쓸 수 있는 이유가 분명할 때 선택하세요.",
+        ? `${productLabel}로 같은 불편을 다시 미루지 마세요.`
+        : "바로 쓸 수 있는 이유가 분명할 때 선택하세요.",
       subheadline_en: "Tie the hesitation and value together into a natural purchase action.",
       bullets: isFinalBeat
         ? [context.customerPain, context.solutionLine, context.successLine]
@@ -6564,23 +6320,11 @@ function buildRoleFallbackCopy(
       storyBeat: isFinalBeat ? "문제와 해결을 묶어 마지막 확신을 주는 장면" : "구매 행동을 제안하는 장면"
     },
     failure: {
-      headline: isSunPatch
-        ? "그냥 나가면, 또 같은 불안이 남습니다"
-        : isSunCare
-          ? "그냥 나가면, 햇빛이 먼저 신경 쓰입니다"
-        : isRunningSocks
-          ? "예전 양말로 계속 뛰면 기록도 흔들립니다"
-          : "미루면 해결되지 않는 비용이 남습니다",
+      headline: "미루면 해결되지 않는 비용이 남습니다",
       headline_en: "The cost of waiting",
       subheadline: context.failureLine,
       subheadline_en: "Show what the customer loses by not solving the problem.",
-      bullets: isSunPatch
-        ? ["햇빛이 강한 순간", "준비를 미룬 아쉬움", "하루 종일 남는 신경 쓰임"]
-        : isSunCare
-          ? ["땀과 물 앞의 불안", "햇빛 강한 순간의 걱정", "준비를 미룬 아쉬움"]
-        : isRunningSocks
-          ? ["발 안에서 밀리는 양말", "쓸림과 물집으로 끊기는 흐름", "발 피로로 흔들리는 페이스"]
-        : ["반복되는 불편", "계속되는 선택 피로", "놓치는 사용 장면"],
+      bullets: ["반복되는 불편", "계속되는 선택 피로", "놓치는 사용 장면"],
       bullets_en: ["The repeated discomfort", "The cost of waiting", "The missed moment"],
       trustLine: context.failureLine,
       CTA: "",
@@ -6624,44 +6368,12 @@ function normalizeCustomerReviewCopyList(values: string[] | undefined, limit: nu
   ).slice(0, limit);
 }
 
-function buildReviewBackedConcernLines(
-  reviewBenefits: string[],
-  context: SalesNarrativeContext
-) {
+// Category-specific concern templates were removed together with the narrative decks:
+// they turned another category's usage scenario (sunscreen, socks) into "customer
+// concerns" for unrelated products. Only product-neutral conversions remain.
+function buildReviewBackedConcernLines(reviewBenefits: string[]) {
   const concerns = reviewBenefits.flatMap((benefit) => {
     const copy = benefit.toLowerCase();
-
-    if (context.category === "sunCare") {
-      if (/물|땀|워터|방수|지속|water|proof/.test(copy)) {
-        return ["물놀이나 땀나는 날 쉽게 지워질까 걱정되지 않았나요?"];
-      }
-      if (/끈적|산뜻|흡수|가벼|부드/.test(copy)) {
-        return ["끈적임 때문에 선크림 바르기를 미루지 않았나요?"];
-      }
-      if (/자외선|차단|햇빛|spf|pa/.test(copy)) {
-        return ["햇빛 강한 날 차단 루틴이 충분할지 걱정되지 않았나요?"];
-      }
-      if (/휴대|간편|챙|작|파우치/.test(copy)) {
-        return ["야외 활동 전 챙기기 번거롭지 않았나요?"];
-      }
-      return [`${benefit}이 좋다는 후기는, 선크림을 고를 때 그 지점이 걱정됐다는 신호입니다.`];
-    }
-
-    if (context.category === "runningSocks") {
-      if (/쫀쫀|핏|잡아|고정|밀림|흘러내/.test(copy)) {
-        return ["러닝 중 양말이 발 안에서 밀리지 않았나요?"];
-      }
-      if (/쿠션|도톰|충격|발바닥|착지/.test(copy)) {
-        return ["착지할 때 발바닥 충격이 신경 쓰이지 않았나요?"];
-      }
-      if (/땀|통기|쾌적|답답|냄새|건조/.test(copy)) {
-        return ["땀이 차서 발이 답답하지 않았나요?"];
-      }
-      if (/쓸림|마찰|물집|뒤꿈치|발목/.test(copy)) {
-        return ["뒤꿈치 쓸림이나 물집 때문에 러닝이 불편하지 않았나요?"];
-      }
-      return [`${benefit}이 좋다는 후기는, 러닝 중 그 지점이 불편했다는 신호입니다.`];
-    }
 
     if (/쿠션|편안|편했|편함/.test(copy)) {
       return ["이전에는 착용감이나 사용감이 오래 신경 쓰이지 않았나요?"];
@@ -6851,14 +6563,15 @@ function normalizeSectionCopyFields(section: PdpSection) {
   };
 }
 
-// Older drafts expanded by the local fallback (and, in this folder, any draft made before the
-// sunCare classifier branch existed) baked running-socks copy (e.g. "발을 잡아주는 쫀쫀한 핏",
-// "착지 부담을 덜어주는 쿠션감", solutionLine "{제품명}는 쫀쫀한 핏과 도톰한 쿠션감…") into non-sock
-// products. `handleGenerateImage` reuses the saved section copy verbatim, so regeneration keeps
+// Older drafts expanded by the local fallback baked another category's template copy —
+// running-socks lines (e.g. "발을 잡아주는 쫀쫀한 핏") or the retired waterproof-sunscreen
+// deck (e.g. "야외 활동 전, 선크림부터 챙기세요") — into unrelated products.
+// `handleGenerateImage` reuses the saved section copy verbatim, so regeneration keeps
 // re-baking the wrong copy. We re-derive ONLY the contaminated sections from clean context
-// (hero + blueprint) when the product is confidently a non-sock category.
+// (hero + blueprint); the narrative context is now always generic, so the re-derived copy
+// cannot carry foreign-category claims again.
 //
-// Detection is two-tier to avoid false positives on legitimate foot-care/beauty copy:
+// Sock detection is two-tier to avoid false positives on legitimate foot-care/beauty copy:
 //  - DISTINCTIVE tokens (양말/삭스/socks/"쫀쫀한 핏") never appear in sunscreen/beauty copy.
 //  - FOOT-ANATOMY tokens (착지/발바닥/뒤꿈치…) CAN appear in real foot-care products, so they
 //    only count as contamination when a running keyword (러닝/마라톤…) is in the same section.
@@ -6866,8 +6579,16 @@ const SOCK_DISTINCTIVE_PATTERN = /양말|삭스|socks?|쫀쫀한?\s*핏/i;
 const SOCK_FOOT_ANATOMY_PATTERN = /착지|발바닥|뒤꿈치|물집|발을\s*잡아|발\s*안에서\s*밀/;
 const SOCK_RUNNING_PATTERN = /러닝|런닝|마라톤|조깅|러너/;
 
-function sectionHasSockFallbackContamination(section: PdpSection) {
-  const haystack = [
+// Fixed sentences that only the retired sunscreen/sun-patch decks produced. LLM copy for a
+// real sunscreen product does not reproduce these template lines verbatim, and the hero
+// product-term guard below keeps genuine sun-care drafts untouched anyway.
+const SUNSCREEN_DECK_PATTERN =
+  /워터프루프\s*선크림|물놀이와\s*야외\s*활동\s*전\s*챙기기\s*좋은|선크림부터\s*챙기세요|물놀이\s*전,?\s*선크림이\s*먼저|물과\s*땀\s*앞에서도\s*챙기는|야외\s*활동\s*전\s*바르는\s*선크림|패키지에서\s*확인하는\s*spf\/pa|spf\/pa\s*표기와\s*워터프루프|선크림\s*걱정보다|선크림이\s*쉽게\s*지워질까|물놀이\s*중\s*쉽게\s*지워지면|spf\/pa\s*표기를\s*믿고|the\s*panol|얼굴에\s*붙이는\s*선\s*패치|붙여\s*쓰는\s*데일리\s*선\s*패치/i;
+const SUNSCREEN_PRODUCT_TERM_PATTERN =
+  /선\s*크림|썬\s*크림|선스크린|sunscreen|sun\s*cream|자외선\s*차단제|선\s*케어|sun\s*care|선\s*패치|썬\s*패치|sun\s*patch/i;
+
+function sectionCopyHaystack(section: PdpSection) {
+  return [
     section.headline,
     section.subheadline,
     section.goal,
@@ -6877,12 +6598,20 @@ function sectionHasSockFallbackContamination(section: PdpSection) {
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function sectionHasSockFallbackContamination(section: PdpSection) {
+  const haystack = sectionCopyHaystack(section);
 
   if (SOCK_DISTINCTIVE_PATTERN.test(haystack)) {
     return true;
   }
 
   return SOCK_FOOT_ANATOMY_PATTERN.test(haystack) && SOCK_RUNNING_PATTERN.test(haystack);
+}
+
+function sectionHasSunscreenFallbackContamination(section: PdpSection) {
+  return SUNSCREEN_DECK_PATTERN.test(sectionCopyHaystack(section));
 }
 
 type DraftCopyHealDeps = {
@@ -6892,59 +6621,38 @@ type DraftCopyHealDeps = {
   customerReviewAnalysis?: PdpCustomerReviewAnalysis | null;
 };
 
-function inferDraftProductCategory(
-  heroSection: PdpSection,
-  contextSections: PdpSection[],
-  deps: DraftCopyHealDeps
-): SalesNarrativeContext["category"] {
-  const probeInput: ExpansionSectionCopyInput = {
-    heroSection,
-    contextSections,
-    sectionId: "category-probe",
-    sectionName: "",
-    goal: "",
-    strategyTitle: "",
-    sectionIndex: 1,
-    totalSections: Math.max(1, contextSections.length),
-    isLastSection: false,
-    additionalInfo: deps.additionalInfo,
-    blueprintSummary: deps.blueprintSummary,
-    blueprintList: deps.blueprintList,
-    customerReviewAnalysis: deps.customerReviewAnalysis
-  };
-
-  return buildSalesNarrativeContext(probeInput, buildExpansionCopyPool(probeInput)).category;
-}
-
 function healLocalFallbackSectionCopy<T extends PdpSection>(sections: T[], deps: DraftCopyHealDeps): T[] {
   if (sections.length <= 1) {
     return sections;
   }
 
   const heroSection = sections[0];
-  // The hero is the anchor for both category inference and the re-derivation copy pool. If even
-  // the hero carries sock markers, the product is likely a real sock product (or the whole draft
-  // was locally expanded), so copy-based inference is unreliable — do not heal.
-  if (sectionHasSockFallbackContamination(heroSection)) {
+  // The hero is server-generated from the user's real product and anchors re-derivation.
+  // If the hero (or the user's own additionalInfo) carries a category's markers, the
+  // product probably IS that category — never treat that marker class as contamination.
+  const heroHaystack = `${sectionCopyHaystack(heroSection)} ${deps.additionalInfo ?? ""}`;
+  const canHealSock =
+    !SOCK_DISTINCTIVE_PATTERN.test(heroHaystack) && !SOCK_RUNNING_PATTERN.test(heroHaystack);
+  const canHealSunscreen =
+    !SUNSCREEN_PRODUCT_TERM_PATTERN.test(heroHaystack) && !SUNSCREEN_DECK_PATTERN.test(heroHaystack);
+
+  if (!canHealSock && !canHealSunscreen) {
     return sections;
   }
+
+  const isContaminated = (section: PdpSection) =>
+    (canHealSock && sectionHasSockFallbackContamination(section)) ||
+    (canHealSunscreen && sectionHasSunscreenFallbackContamination(section));
 
   // Non-contaminated sections (always incl. the server-generated hero) form the clean copy
-  // pool used for re-derivation, so sock phrases are never fed back into the new copy.
-  const cleanContextSections = sections.filter((section) => !sectionHasSockFallbackContamination(section));
+  // pool used for re-derivation, so template phrases are never fed back into the new copy.
+  const cleanContextSections = sections.filter((section) => !isContaminated(section));
   const contextSections: PdpSection[] = cleanContextSections.length ? cleanContextSections : [heroSection];
-
-  const category = inferDraftProductCategory(heroSection, contextSections, deps);
-  // Only heal when the product is confidently a known non-sock category. Real running socks
-  // (or an ambiguous "generic" product) are never touched, so we cannot mis-erase real copy.
-  if (category !== "sunCare" && category !== "sunPatch" && category !== "beauty") {
-    return sections;
-  }
 
   let healed = false;
   const next = sections.map((section, index) => {
-    // Hero copy is server-generated and drives classification; never re-derive it.
-    if (index === 0 || !sectionHasSockFallbackContamination(section)) {
+    // Hero copy is server-generated and anchors the clean pool; never re-derive it.
+    if (index === 0 || !isContaminated(section)) {
       return section;
     }
 
