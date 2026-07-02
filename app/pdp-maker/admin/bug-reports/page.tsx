@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
-import { Bug, CheckCircle2, LogOut, Mail, MessageSquareText, RefreshCw } from "lucide-react";
+import { Bug, CheckCircle2, ChevronDown, LogOut, Mail, MessageSquareText, RefreshCw } from "lucide-react";
 import {
   isPdpBugReportAdminSessionAuthorized,
   isPdpBugReportAdminTokenConfigured,
@@ -56,6 +56,7 @@ export default async function PdpMakerBugReportsAdminPage({ searchParams }: PdpM
   const tokenConfigured = isPdpBugReportAdminTokenConfigured();
   const authorized = isPdpBugReportAdminSessionAuthorized(adminSession);
   const activeStatus = normalizeStatus(searchParams?.status);
+  const highlightReportId = searchParams?.updated || searchParams?.memo || "";
   const allReports = authorized ? await listPdpBugReports({ limit: 200 }) : [];
   const reports = activeStatus ? allReports.filter((report) => report.status === activeStatus) : allReports;
   const counts = countReports(allReports);
@@ -126,7 +127,12 @@ export default async function PdpMakerBugReportsAdminPage({ searchParams }: PdpM
             {reports.length ? (
               <section className={styles.bugAdminList}>
                 {reports.map((report) => (
-                  <BugReportAdminCard activeStatus={activeStatus} key={report.id} report={report} />
+                  <BugReportAdminCard
+                    activeStatus={activeStatus}
+                    defaultOpen={report.id === highlightReportId}
+                    key={report.id}
+                    report={report}
+                  />
                 ))}
               </section>
             ) : (
@@ -170,9 +176,11 @@ function AdminNotice({ searchParams }: { searchParams?: PdpMakerBugReportsAdminP
 
 function BugReportAdminCard({
   activeStatus,
+  defaultOpen,
   report
 }: {
   activeStatus: "" | PdpBugReportStatus;
+  defaultOpen?: boolean;
   report: PdpBugReportRecord;
 }) {
   const eventCount = report.recentEvents?.length ?? 0;
@@ -183,26 +191,30 @@ function BugReportAdminCard({
     .find((item) => item.channel === "customer-email");
 
   return (
-    <article className={styles.bugAdminCard}>
-      <div className={styles.bugAdminCardHeader}>
-        <div className={styles.bugAdminCardTitle}>
-          <div className={styles.bugAdminBadges}>
-            <span className={statusBadgeClass(report.status)}>{STATUS_LABELS[report.status]}</span>
-            <span className={styles.bugAdminBadge}>{getPdpBugReportCategoryLabel(report.category)}</span>
-            {eventCount ? <span className={styles.bugAdminBadge}>로그 {eventCount}</span> : null}
+    <details className={styles.bugAdminCard} open={defaultOpen}>
+      <summary className={styles.bugAdminCardSummary}>
+        <div className={styles.bugAdminCardHeader}>
+          <div className={styles.bugAdminCardTitle}>
+            <div className={styles.bugAdminBadges}>
+              <span className={statusBadgeClass(report.status)}>{STATUS_LABELS[report.status]}</span>
+              <span className={styles.bugAdminBadge}>{getPdpBugReportCategoryLabel(report.category)}</span>
+              {eventCount ? <span className={styles.bugAdminBadge}>로그 {eventCount}</span> : null}
+            </div>
+            <h2>{report.title}</h2>
           </div>
-          <h2>{report.title}</h2>
+          <div className={styles.bugAdminMeta}>
+            <strong>{formatKst(report.createdAt)}</strong>
+            <span>{report.id}</span>
+            <span>{report.reporterEmail || report.contact || "이메일 없음"}</span>
+            {latestCustomerNotification ? (
+              <span>{latestCustomerNotification.ok ? "고객 메일 발송됨" : "고객 메일 실패"}</span>
+            ) : null}
+          </div>
         </div>
-        <div className={styles.bugAdminMeta}>
-          <strong>{formatKst(report.createdAt)}</strong>
-          <span>{report.id}</span>
-          <span>{report.reporterEmail || report.contact || "이메일 없음"}</span>
-          {latestCustomerNotification ? (
-            <span>{latestCustomerNotification.ok ? "고객 메일 발송됨" : "고객 메일 실패"}</span>
-          ) : null}
-        </div>
-      </div>
+        <ChevronDown aria-hidden className={styles.bugAdminCardChevron} size={18} />
+      </summary>
 
+      <div className={styles.bugAdminCardBody}>
       <p className={styles.bugAdminDescription}>{report.description}</p>
 
       <div className={styles.bugAdminDetailGrid}>
@@ -307,7 +319,8 @@ function BugReportAdminCard({
           <pre>{formatRecentEvents(report)}</pre>
         </div>
       ) : null}
-    </article>
+      </div>
+    </details>
   );
 }
 
