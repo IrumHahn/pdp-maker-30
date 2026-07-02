@@ -4,7 +4,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
 import { AlertCircle, Bot, Clock3, Copy, FileText, FolderOpen, KeyRound, Loader2, Menu, RectangleHorizontal, RectangleVertical, Settings2, Smartphone, Sparkles, Square, Trash2, Upload, Wand2, X } from "lucide-react";
-import { getPdpSectionImageDefaults } from "@runacademy/shared";
+import { formatBytesMb, getPdpSectionImageDefaults, summarizeAnalyzeBudget } from "@runacademy/shared";
 import type {
   AspectRatio,
   GeneratedResult,
@@ -1262,6 +1262,43 @@ export function PdpMakerClient() {
       const sourceMaterialsForDraft = syncSourceMaterialsWithPrimary(sourceMaterials, imageForAnalyze);
       const sourceMaterialsForAnalyze = buildAnalyzeSourceMaterials(sourceMaterialsForDraft);
       setSourceMaterials(sourceMaterialsForDraft);
+
+      const analyzeBudget = summarizeAnalyzeBudget({
+        imageBase64: imageForAnalyze.base64,
+        generationImageBase64: imageForAnalyze.generationBase64 ?? imageForAnalyze.base64,
+        modelImageBase64: modelImage?.base64,
+        sourceImageBase64s: sourceMaterialsForAnalyze
+          ?.map((material) => material.imageBase64)
+          .filter((value): value is string => Boolean(value)),
+        textChars:
+          (knowledgeText?.length ?? 0) +
+          additionalInfo.length +
+          desiredTone.length +
+          (customerReviewAnalysis ? JSON.stringify(customerReviewAnalysis).length : 0) +
+          (sourceMaterialsForAnalyze?.reduce((sum, material) => sum + (material.text?.length ?? 0), 0) ?? 0)
+      });
+
+      if (analyzeBudget.exceeds) {
+        // Vercel rejects request bodies over ~4.5MB at the edge (413 FUNCTION_PAYLOAD_TOO_LARGE)
+        // before the function runs. Guard here so the user gets a clear reason instead of an opaque
+        // failure. Per-image copies are already bounded in prepareImageFile; this catches the case
+        // of too many attached images summing past the ceiling.
+        logSetupEvent(
+          "setup.analyze_payload_over_budget",
+          {
+            totalBytes: analyzeBudget.totalBytes,
+            displayBytes: analyzeBudget.displayBytes,
+            budget: analyzeBudget.budget,
+            sourceImageCount: sourceMaterialsForAnalyze?.filter((material) => material.imageBase64).length ?? 0
+          },
+          "warn"
+        );
+        returnToDetailsWithError(
+          `첨부한 이미지 용량이 커서(약 ${formatBytesMb(analyzeBudget.displayBytes)}) 한 번에 분석할 수 없어요. 대표 이미지 1장과 꼭 필요한 보조 이미지만 남기거나, 더 작은 이미지로 올려주세요.`,
+          "한 번의 서버 요청에 담을 수 있는 용량(약 4.5MB)을 넘었습니다. 보조 이미지 수를 줄이면 해결됩니다."
+        );
+        return;
+      }
 
       setLoadingStep("제품을 분석하고 히어로우 첫 장을 설계하는 중입니다.");
 

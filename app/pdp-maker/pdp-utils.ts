@@ -1,4 +1,5 @@
 import type { AspectRatio, PdpAnalysisImageMetadata, PdpAnalysisStrip, PdpValidateApiKeyResponse } from "@runacademy/shared";
+import { ANALYSIS_IMAGE_MAX_BYTES, GENERATION_IMAGE_MAX_BYTES } from "@runacademy/shared";
 import { resolveGeminiApiKeyHeaderValue, resolveOpenAiApiKeyHeaderValue } from "./pdp-settings";
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
@@ -144,7 +145,6 @@ const LONG_DETAIL_MIN_RATIO = 4.5;
 const UPLOAD_MAX_BYTES = 4_000_000;
 const UPLOAD_MAX_EDGE = 4096;
 const UPLOAD_MIN_QUALITY = 0.5;
-const LARGE_ORIGINAL_BYTES = 3_200_000;
 
 export async function prepareImageFile(file: File, options?: { allowLongPageSampling?: boolean }) {
   const headerDimensions = await readImageDimensions(file).catch(() => null);
@@ -174,10 +174,11 @@ export async function prepareImageFile(file: File, options?: { allowLongPageSamp
     return buildStandardImagePayload(sourceImage, file);
   }
 
-  if (file.size > LARGE_ORIGINAL_BYTES) {
-    // Even at normal dimensions a heavy original (e.g. a high-bit-depth PNG) inflates ~33% as
-    // base64 and would blow past the 4.5MB analyze-request limit, so re-encode it down instead
-    // of sending the raw original.
+  if (file.size > ANALYSIS_IMAGE_MAX_BYTES) {
+    // A raw original above one analysis-copy budget (~700KB) would be sent verbatim as BOTH the
+    // analysis AND generation copy — doubling it in the request body and, once a few source images
+    // are attached, blowing past Vercel's 4.5MB analyze-request limit (413). Re-encode down to
+    // bounded analysis(1024px) + generation(2048px) JPEGs instead of sending the raw original.
     return buildStandardImagePayload(sourceImage, file);
   }
 
@@ -353,8 +354,8 @@ function buildOriginalImagePayload(sourceDataUrl: string, sourceWidth: number, s
 function buildStandardImagePayload(sourceImage: HTMLImageElement, file: File) {
   const sourceWidth = sourceImage.naturalWidth || sourceImage.width;
   const sourceHeight = sourceImage.naturalHeight || sourceImage.height;
-  const analysisPayload = resizeImageToJpegPayload(sourceImage, STANDARD_ANALYSIS_MAX_DIMENSION, 0.84);
-  const generationReference = resizeImageToJpegPayload(sourceImage, STANDARD_GENERATION_MAX_DIMENSION, 0.9);
+  const analysisPayload = resizeImageToJpegPayload(sourceImage, STANDARD_ANALYSIS_MAX_DIMENSION, 0.84, ANALYSIS_IMAGE_MAX_BYTES);
+  const generationReference = resizeImageToJpegPayload(sourceImage, STANDARD_GENERATION_MAX_DIMENSION, 0.9, GENERATION_IMAGE_MAX_BYTES);
   const analysisMetadata: PdpAnalysisImageMetadata = {
     mode: "standard-resize",
     originalWidth: sourceWidth,
@@ -393,10 +394,41 @@ function parseImageDataUrl(sourceDataUrl: string, file: File) {
 }
 
 
-function resizeImageToJpegPayload(sourceImage: HTMLImageElement, maxDimension: number, quality: number) {
+function resizeImageToJpegPayload(
+  sourceImage: HTMLImageElement,
+  maxDimension: number,
+  quality: number,
+  maxBytes?: number
+) {
   const sourceWidth = sourceImage.naturalWidth || sourceImage.width;
   const sourceHeight = sourceImage.naturalHeight || sourceImage.height;
-  const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight, 1));
+  let scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight, 1));
+  let currentQuality = quality;
+  let payload = renderScaledJpeg(sourceImage, sourceWidth, sourceHeight, scale, currentQuality);
+
+  // A fixed dimension + quality can still overshoot the byte budget for busy, highly-detailed
+  // images (a 2048px photo JPEG can top 2MB), which would push the bundled analyze body past
+  // Vercel's 4.5MB limit. Trim quality first (cheap, keeps resolution) then dimensions until the
+  // copy fits its budget.
+  for (let attempt = 0; maxBytes && payload.bytes > maxBytes && attempt < 8; attempt += 1) {
+    if (currentQuality > UPLOAD_MIN_QUALITY) {
+      currentQuality = Math.max(UPLOAD_MIN_QUALITY, currentQuality - 0.12);
+    } else {
+      scale *= 0.85;
+    }
+    payload = renderScaledJpeg(sourceImage, sourceWidth, sourceHeight, scale, currentQuality);
+  }
+
+  return payload;
+}
+
+function renderScaledJpeg(
+  sourceImage: HTMLImageElement,
+  sourceWidth: number,
+  sourceHeight: number,
+  scale: number,
+  quality: number
+) {
   const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
   const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
   const canvas = document.createElement("canvas");
