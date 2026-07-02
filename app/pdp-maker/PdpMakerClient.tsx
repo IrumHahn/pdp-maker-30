@@ -1738,13 +1738,14 @@ export function PdpMakerClient() {
       // attached product-photo candidate the model may pick (works on restored drafts too —
       // the photo's payload IS persisted, unlike sourceFile). Deferring is always safe: the
       // server still returns its heroReference as the fallback reference.
-      const hasAttachedProductImageCandidate = sourceMaterialsForDraft.some(
+      const attachedProductImageCandidates = sourceMaterialsForDraft.filter(
         (material) =>
           material.role !== "primary" &&
           material.kind === "image" &&
           Boolean(material.preparedImage?.base64) &&
           material.preparedImage?.analysisMetadata?.mode !== "long-detail-strips"
       );
+      const hasAttachedProductImageCandidate = attachedProductImageCandidates.length > 0;
       const deferHeroGeneration = Boolean(
         analysisStripsForAnalyze?.length && (originalSourceFile || hasAttachedProductImageCandidate)
       );
@@ -1851,6 +1852,26 @@ export function PdpMakerClient() {
             };
             usedAttachedProductImage = true;
             attachedProductImageFileName = pickedMaterial.fileName || "";
+          }
+        }
+
+        // User-intent fallback: exactly ONE attached product photo means the user followed the
+        // guidance banner ("제품 생김새는 그 사진에서 가져오고") — honor it even when the model
+        // didn't pick it confidently. A page-strip reference lets the image model INVENT brands
+        // (measured: a competitor logo appeared on a subscriber-style run). Multiple candidates
+        // stay model-gated because auto-choosing among them risks the wrong product.
+        if (!usedAttachedProductImage && attachedProductImageCandidates.length === 1) {
+          const soleCandidate = attachedProductImageCandidates[0];
+          const soleImage = soleCandidate.preparedImage;
+          if (soleImage?.base64) {
+            nextResult = {
+              ...nextResult,
+              originalImage: soleImage.generationBase64 ?? soleImage.base64,
+              originalImageMimeType: soleImage.generationMimeType ?? soleImage.mimeType,
+              originalImageFileName: soleCandidate.fileName || "product-reference.jpg"
+            };
+            usedAttachedProductImage = true;
+            attachedProductImageFileName = soleCandidate.fileName || "";
           }
         }
 
@@ -1990,13 +2011,17 @@ export function PdpMakerClient() {
       // burying it in the success notice — a wrong hero should be obvious, not silent.
       // With an explicit attached product photo as the appearance reference, the "wrong
       // product in hero" warnings no longer apply — the appearance is anchored to a real photo.
+      // When photos WERE attached but none could be used (multiple candidates, no confident
+      // pick), the advice must not be "add a photo" — the user already did.
       const heroWarning = usedAttachedProductImage
         ? ""
-        : multiProductDetected
-          ? "히어로 제품 확인 필요 — 업로드한 상세페이지에 제품이 여러 개 보여서, 히어로에 의도와 다른 제품이 들어갔을 수 있어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 제품만 단독으로 나온 깨끗한 사진 1장을 같은 업로드 칸에 추가해 다시 생성하세요."
-          : productCutUncertain
-            ? "히어로 제품 확인 필요 — 이 상세페이지에서 ‘깨끗한 제품컷’을 확신하지 못해(배너·연출컷 위주) 대표 구간으로 히어로를 만들었어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 제품만 단독으로 나온 깨끗한 사진 1장을 같은 업로드 칸에 추가해 다시 생성하세요."
-            : "";
+        : hasAttachedProductImageCandidate
+          ? "히어로 제품 확인 필요 — 함께 올려주신 제품 이미지 중 어떤 것이 주력 제품인지 확신하지 못해 이번 생성에는 사용하지 못했어요. [추가 정보]에 정확한 제품명을 적거나, 주력 제품 사진 1장만 남기고 다시 생성하면 정확해집니다."
+          : multiProductDetected
+            ? "히어로 제품 확인 필요 — 업로드한 상세페이지에 제품이 여러 개 보여서, 히어로에 의도와 다른 제품이 들어갔을 수 있어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 제품만 단독으로 나온 깨끗한 사진 1장을 같은 업로드 칸에 추가해 다시 생성하세요."
+            : productCutUncertain
+              ? "히어로 제품 확인 필요 — 이 상세페이지에서 ‘깨끗한 제품컷’을 확신하지 못해(배너·연출컷 위주) 대표 구간으로 히어로를 만들었어요. 히어로 제품이 실제와 다르면 [추가 정보]에 정확한 제품명을 적거나, 제품만 단독으로 나온 깨끗한 사진 1장을 같은 업로드 칸에 추가해 다시 생성하세요."
+              : "";
       const completedNotice = `${baseCompletedNotice}${insightNotice}${transcriptNotice}${heroReferenceNotice}`;
       const nextEditorDraftState = {
         ...createDefaultEditorDraftState(nextResult, outputMode),
