@@ -41,7 +41,7 @@ export interface PdpBugReportNotificationStatus {
   timestamp: string;
 }
 
-export type PdpBugReportAdminEventType = "status" | "memo";
+export type PdpBugReportAdminEventType = "status" | "memo" | "draft";
 
 export interface PdpBugReportAdminEvent {
   id: string;

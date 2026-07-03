@@ -251,6 +251,37 @@ export async function addPdpBugReportMemo(reportId: string, rawMemo: unknown) {
   };
 }
 
+// 트리아지(로컬 자동화)가 만든 회신 초안을 서버에 기록한다. 고객 메일 발송·상태 변경 없음 —
+// 어드민 페이지에서 초안을 확인·수정한 뒤 승인(해결 처리)할 때 비로소 고객에게 발송된다.
+export async function addPdpBugReportDraft(reportId: string, rawDraft: unknown) {
+  const report = await getPdpBugReportById(reportId);
+  if (!report) {
+    return { ok: false as const, message: "신고를 찾지 못했습니다." };
+  }
+
+  const draft = cleanText(rawDraft, MAX_ADMIN_MEMO_LENGTH);
+  if (draft.length < 2) {
+    return { ok: false as const, message: "초안 내용을 조금 더 적어주세요." };
+  }
+
+  const createdAt = new Date().toISOString();
+  const event: PdpBugReportAdminEvent = {
+    id: createAdminEventId(createdAt),
+    reportId: report.id,
+    type: "draft",
+    actor: "admin",
+    memo: draft,
+    createdAt
+  };
+
+  await appendAdminEvent(event);
+
+  return {
+    ok: true as const,
+    value: event
+  };
+}
+
 export function isPdpBugReportAdminAuthorized(request: Request) {
   const configuredToken = getConfiguredAdminToken();
   if (!configuredToken) {
@@ -726,7 +757,7 @@ function parseAdminEvent(line: string): PdpBugReportAdminEvent | null {
     if (!parsed?.id || !parsed.reportId || !parsed.createdAt) {
       return null;
     }
-    if (parsed.type !== "status" && parsed.type !== "memo") {
+    if (parsed.type !== "status" && parsed.type !== "memo" && parsed.type !== "draft") {
       return null;
     }
 

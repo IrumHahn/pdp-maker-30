@@ -47,6 +47,7 @@ interface PdpMakerBugReportsAdminPageProps {
     login?: string;
     updated?: string;
     memo?: string;
+    draft?: string;
     error?: string;
   };
 }
@@ -56,7 +57,7 @@ export default async function PdpMakerBugReportsAdminPage({ searchParams }: PdpM
   const tokenConfigured = isPdpBugReportAdminTokenConfigured();
   const authorized = isPdpBugReportAdminSessionAuthorized(adminSession);
   const activeStatus = normalizeStatus(searchParams?.status);
-  const highlightReportId = searchParams?.updated || searchParams?.memo || "";
+  const highlightReportId = searchParams?.updated || searchParams?.memo || searchParams?.draft || "";
   const allReports = authorized ? await listPdpBugReports({ limit: 200 }) : [];
   const reports = activeStatus ? allReports.filter((report) => report.status === activeStatus) : allReports;
   const counts = countReports(allReports);
@@ -167,6 +168,15 @@ function AdminNotice({ searchParams }: { searchParams?: PdpMakerBugReportsAdminP
     );
   }
 
+  if (searchParams?.draft) {
+    return (
+      <div className={styles.bugAdminNotice}>
+        <MessageSquareText size={16} />
+        회신 초안을 저장했습니다. 승인 전까지 고객에게 발송되지 않습니다.
+      </div>
+    );
+  }
+
   if (searchParams?.error) {
     return <div className={styles.bugAdminNoticeError}>요청을 처리하지 못했습니다. 새로고침 후 다시 시도해 주세요.</div>;
   }
@@ -189,6 +199,8 @@ function BugReportAdminCard({
     .reverse()
     .flatMap((event) => event.notifications ?? [])
     .find((item) => item.channel === "customer-email");
+  const latestDraft = [...adminEvents].reverse().find((event) => event.type === "draft" && event.memo);
+  const draftPending = Boolean(latestDraft) && (report.status === "new" || report.status === "reviewing");
 
   return (
     <details className={styles.bugAdminCard} open={defaultOpen}>
@@ -198,6 +210,7 @@ function BugReportAdminCard({
             <div className={styles.bugAdminBadges}>
               <span className={statusBadgeClass(report.status)}>{STATUS_LABELS[report.status]}</span>
               <span className={styles.bugAdminBadge}>{getPdpBugReportCategoryLabel(report.category)}</span>
+              {draftPending ? <span className={styles.bugAdminBadgeReviewing}>초안 대기</span> : null}
               {eventCount ? <span className={styles.bugAdminBadge}>로그 {eventCount}</span> : null}
             </div>
             <h2>{report.title}</h2>
@@ -238,6 +251,27 @@ function BugReportAdminCard({
           <code>알림 결과가 기록되지 않았습니다.</code>
         )}
       </div>
+
+      {draftPending && latestDraft ? (
+        <section className={styles.bugAdminWorkflow}>
+          <div className={styles.bugAdminWorkflowHeader}>
+            <strong>회신 초안 (승인 대기)</strong>
+            <span>트리아지가 작성한 초안입니다. 수정 후 승인하면 해결 처리되며 고객에게 이메일이 발송됩니다.</span>
+          </div>
+          <form action="/api/pdp/bug-reports/admin-actions" className={styles.bugAdminStatusForm} method="post">
+            <input name="action" type="hidden" value="status" />
+            <input name="reportId" type="hidden" value={report.id} />
+            <input name="returnTo" type="hidden" value={makeFilterHref(activeStatus)} />
+            <textarea defaultValue={latestDraft.memo} maxLength={1200} name="memo" required rows={10} />
+            <div className={styles.bugAdminStatusButtons}>
+              <button className={styles.primaryButton} name="status" type="submit" value="resolved">
+                <Mail size={15} />
+                초안 승인 발송 (해결 처리)
+              </button>
+            </div>
+          </form>
+        </section>
+      ) : null}
 
       <section className={styles.bugAdminWorkflow}>
         <div className={styles.bugAdminWorkflowHeader}>
@@ -397,6 +431,10 @@ function formatRecentEvents(report: PdpBugReportRecord) {
 function formatAdminEventTitle(event: PdpBugReportAdminEvent) {
   if (event.type === "memo") {
     return "내부 메모";
+  }
+
+  if (event.type === "draft") {
+    return "회신 초안 저장";
   }
 
   const previous = event.previousStatus ? STATUS_LABELS[event.previousStatus] : "이전 상태";

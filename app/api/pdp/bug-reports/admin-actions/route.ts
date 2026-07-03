@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  addPdpBugReportDraft,
   addPdpBugReportMemo,
   isPdpBugReportAdminAuthorized,
   updatePdpBugReportStatus
@@ -40,6 +41,12 @@ export async function POST(request: Request) {
   if (action === "memo") {
     const result = await addPdpBugReportMemo(reportId, memo);
     redirectUrl.searchParams.set(result.ok ? "memo" : "error", reportId);
+    return NextResponse.redirect(redirectUrl, { status: 303 });
+  }
+
+  if (action === "draft") {
+    const result = await addPdpBugReportDraft(reportId, memo);
+    redirectUrl.searchParams.set(result.ok ? "draft" : "error", reportId);
     return NextResponse.redirect(redirectUrl, { status: 303 });
   }
 
