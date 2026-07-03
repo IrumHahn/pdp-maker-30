@@ -4,6 +4,7 @@
 .next
 node_modules
 output
+.tmp-codex-pdp
 test-results
 .playwright-cli
 .playwright-mcp

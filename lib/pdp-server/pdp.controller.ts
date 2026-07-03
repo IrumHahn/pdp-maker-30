@@ -72,7 +72,7 @@ export class PdpController {
       return {
         ok: true as const,
         analysis,
-        model: "gpt-5.4-mini"
+        model: openAiApiKeyOverride?.trim() ? "gpt-5.4-mini" : "codex-cli"
       };
     } catch (error) {
       return toPdpErrorResponse(error);

@@ -332,14 +332,15 @@ export function PdpMakerClient() {
   const hasAvailableGeminiKey = Boolean(effectiveGeminiApiKey);
   const hasAvailableOpenAiKey = Boolean(effectiveOpenAiApiKey);
   const processingProvider: PdpAiProvider = outputMode === "full-image" ? "openai" : aiProvider;
-  const selectedProviderHasKey = processingProvider === "openai" ? hasAvailableOpenAiKey : hasAvailableGeminiKey;
+  const selectedProviderUsesCodex = processingProvider === "openai" ? !hasAvailableOpenAiKey : !hasAvailableGeminiKey;
   const hasPendingCustomerReviewAnalysis = Boolean(customerReviewSource && !customerReviewAnalysis);
-  const customerReviewRequiresChatGptNotice = Boolean(customerReviewSource && !customerReviewAnalysis && !hasAvailableOpenAiKey);
   const canContinueToDetails = Boolean(preparedImage && (!modelImage || modelImageUsage) && !hasPendingCustomerReviewAnalysis);
-  const canAnalyze = Boolean(preparedImage && (!modelImage || modelImageUsage) && selectedProviderHasKey && !hasPendingCustomerReviewAnalysis);
-  const apiConnectionLabel = hasAvailableGeminiKey || hasAvailableOpenAiKey
+  const canAnalyze = Boolean(preparedImage && (!modelImage || modelImageUsage) && !hasPendingCustomerReviewAnalysis);
+  const apiConnectionLabel = selectedProviderUsesCodex
+    ? "Codex CLI"
+    : hasAvailableGeminiKey || hasAvailableOpenAiKey
     ? `${hasAvailableGeminiKey ? "Gemini" : ""}${hasAvailableGeminiKey && hasAvailableOpenAiKey ? " + " : ""}${hasAvailableOpenAiKey ? "OpenAI" : ""}`
-    : "키 필요";
+    : "Codex CLI";
   const selectedProviderLabel = AI_PROVIDER_OPTIONS.find((option) => option.value === processingProvider)?.label ?? "Gemini";
   const selectedOutputMode = OUTPUT_MODE_OPTIONS.find((option) => option.value === outputMode) ?? OUTPUT_MODE_OPTIONS[0];
   const estimatedProcessingSeconds = useMemo(
@@ -660,38 +661,20 @@ export function PdpMakerClient() {
     }
   };
 
-  const getCustomerReviewChatGptNotice = () =>
-    hasAvailableGeminiKey
-      ? "Gemini 키만 연결되어 있습니다. 고객 후기/상세페이지 분석은 ChatGPT만 가능하므로 설정에서 OpenAI API 키를 입력해 주세요."
-      : "고객 후기/상세페이지 분석은 ChatGPT만 가능합니다. 설정에서 OpenAI API 키를 입력한 뒤 다시 분석해 주세요.";
+  const getCustomerReviewAnalyzerLabel = () => (effectiveOpenAiApiKey ? "ChatGPT" : "Codex CLI");
 
   const analyzeCustomerReviewSource = async (source: PdpCustomerReviewSource) => {
     const currentOpenAiApiKey = effectiveOpenAiApiKey;
-
-    if (!currentOpenAiApiKey) {
-      const message = getCustomerReviewChatGptNotice();
-      setCustomerReviewAnalysisError(message);
-      setNotice(message);
-      logSetupEvent(
-        "setup.customer_review_analysis_blocked",
-        {
-          reason: hasAvailableGeminiKey ? "gemini_only" : "missing_openai_key",
-          reviewCount: source.reviewCount,
-          sampledReviewCount: source.sampledReviewCount ?? source.reviews.length
-        },
-        "warn"
-      );
-      return;
-    }
+    const analyzerLabel = getCustomerReviewAnalyzerLabel();
 
     setIsAnalyzingCustomerReviews(true);
     setCustomerReviewAnalysisError("");
-    setNotice(`고객 후기 파일을 ChatGPT로 분석하고 있습니다.`);
+    setNotice(`고객 후기 파일을 ${analyzerLabel}로 분석하고 있습니다.`);
     logSetupEvent("setup.customer_review_ai_analysis_started", {
       fileName: source.fileName,
       reviewCount: source.reviewCount,
       sampledReviewCount: source.sampledReviewCount ?? source.reviews.length,
-      model: "gpt-5.4-mini"
+      model: currentOpenAiApiKey ? "gpt-5.4-mini" : "codex-cli"
     });
 
     try {
@@ -730,7 +713,7 @@ export function PdpMakerClient() {
 
       setCustomerReviewAnalysis(response.analysis);
       setCustomerReviewAnalysisError("");
-      setNotice(`ChatGPT가 후기 파일을 분석했습니다. 결과를 확인한 뒤 다음 단계로 넘어가세요.`);
+      setNotice(`${analyzerLabel}가 후기 파일을 분석했습니다. 결과를 확인한 뒤 다음 단계로 넘어가세요.`);
       logSetupEvent("setup.customer_review_ai_analysis_completed", {
         reviewCount: response.analysis.reviewCount,
         sampledReviewCount: response.analysis.sampledReviewCount ?? response.analysis.reviewCount,
@@ -739,7 +722,7 @@ export function PdpMakerClient() {
         painPointCount: response.analysis.painPoints.length
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "ChatGPT 후기 분석 중 오류가 발생했습니다.";
+      const message = error instanceof Error ? error.message : `${analyzerLabel} 후기 분석 중 오류가 발생했습니다.`;
       setCustomerReviewAnalysisError(message);
       setNotice(message);
       logSetupEvent(
@@ -793,12 +776,12 @@ export function PdpMakerClient() {
       };
 
       setCustomerReviewSource(source);
-      setNotice(`고객 후기 파일을 준비했습니다. ChatGPT 분석 결과를 확인한 뒤 다음 단계로 넘어갑니다.`);
+      setNotice(`고객 후기 파일을 준비했습니다. ${getCustomerReviewAnalyzerLabel()} 분석 결과를 확인한 뒤 다음 단계로 넘어갑니다.`);
       logSetupEvent("setup.customer_review_file_parsed", {
         file: summarizeFileForUsageLog(file),
         reviewCount: source.reviewCount,
         sampledReviewCount: source.sampledReviewCount,
-        willAnalyzeWithOpenAi: hasAvailableOpenAiKey
+        analyzer: hasAvailableOpenAiKey ? "openai" : "codex-cli"
       });
 
       await analyzeCustomerReviewSource(source);
@@ -1523,26 +1506,8 @@ export function PdpMakerClient() {
       return;
     }
 
-    if (!selectedProviderHasKey) {
-      setErrorMessage(`설정 메뉴에서 본인 ${selectedProviderLabel} API 키를 먼저 입력해 주세요.`);
-      logSetupEvent("setup.analyze_blocked", { reason: "missing_selected_provider_key", provider: processingProvider }, "warn");
-      return;
-    }
-
     const currentGeminiApiKey = effectiveGeminiApiKey;
     const currentOpenAiApiKey = effectiveOpenAiApiKey;
-
-    if (processingProvider === "gemini" && !currentGeminiApiKey) {
-      setErrorMessage("설정 메뉴에서 본인 Gemini API 키를 먼저 입력해 주세요.");
-      logSetupEvent("setup.analyze_blocked", { reason: "missing_gemini_key" }, "warn");
-      return;
-    }
-
-    if (processingProvider === "openai" && !currentOpenAiApiKey) {
-      setErrorMessage("설정 메뉴에서 본인 OpenAI API 키를 먼저 입력해 주세요.");
-      logSetupEvent("setup.analyze_blocked", { reason: "missing_openai_key" }, "warn");
-      return;
-    }
 
     if (modelImage && !modelImageUsage) {
       setErrorMessage("모델 이미지를 사용할 방식을 먼저 선택해 주세요.");
@@ -1551,9 +1516,7 @@ export function PdpMakerClient() {
     }
 
     if (hasPendingCustomerReviewAnalysis) {
-      const message = customerReviewRequiresChatGptNotice
-        ? getCustomerReviewChatGptNotice()
-        : "고객 후기 파일의 ChatGPT 분석이 끝난 뒤 상세페이지 생성을 시작할 수 있습니다.";
+      const message = `고객 후기 파일의 ${getCustomerReviewAnalyzerLabel()} 분석이 끝난 뒤 상세페이지 생성을 시작할 수 있습니다.`;
       setCustomerReviewAnalysisError(message);
       setErrorMessage(message);
       setSetupStep("upload");
@@ -1575,7 +1538,11 @@ export function PdpMakerClient() {
     setErrorMessage("");
     setErrorDetail("");
     setShowErrorDetail(false);
-    setLoadingStep(`입력한 ${selectedProviderLabel} API 키 연결 상태를 확인하는 중입니다.`);
+    setLoadingStep(
+      selectedProviderUsesCodex
+        ? "Codex CLI 연결 상태를 확인하는 중입니다."
+        : `입력한 ${selectedProviderLabel} API 키 연결 상태를 확인하는 중입니다.`
+    );
     logSetupEvent("setup.analyze_started", {
       provider: processingProvider,
       outputMode,
@@ -1591,28 +1558,34 @@ export function PdpMakerClient() {
     });
 
     try {
-      const keyValidation =
-        processingProvider === "openai"
-          ? await validateOpenAiApiKey(currentOpenAiApiKey ?? "")
-          : await validateGeminiApiKey(currentGeminiApiKey ?? "");
+      if (selectedProviderUsesCodex) {
+        logSetupEvent("setup.codex_cli_selected", {
+          provider: processingProvider
+        });
+      } else {
+        const keyValidation =
+          processingProvider === "openai"
+            ? await validateOpenAiApiKey(currentOpenAiApiKey ?? "")
+            : await validateGeminiApiKey(currentGeminiApiKey ?? "");
 
-      if (!keyValidation.ok) {
-        logSetupEvent(
-          "setup.api_key_validation_failed",
-          {
-            provider: processingProvider,
-            code: "code" in keyValidation ? keyValidation.code : undefined
-          },
-          "warn",
-          keyValidation.detail || keyValidation.message
-        );
-        returnToDetailsWithError(keyValidation.message, keyValidation.detail);
-        return;
+        if (!keyValidation.ok) {
+          logSetupEvent(
+            "setup.api_key_validation_failed",
+            {
+              provider: processingProvider,
+              code: "code" in keyValidation ? keyValidation.code : undefined
+            },
+            "warn",
+            keyValidation.detail || keyValidation.message
+          );
+          returnToDetailsWithError(keyValidation.message, keyValidation.detail);
+          return;
+        }
+
+        logSetupEvent("setup.api_key_validation_passed", {
+          provider: processingProvider
+        });
       }
-
-      logSetupEvent("setup.api_key_validation_passed", {
-        provider: processingProvider
-      });
 
       const imageForAnalyze = await ensureAnalysisSafePreparedImage(preparedImage);
       if (!imageForAnalyze) {
@@ -2159,9 +2132,7 @@ export function PdpMakerClient() {
     }
 
     if (hasPendingCustomerReviewAnalysis) {
-      const message = customerReviewRequiresChatGptNotice
-        ? getCustomerReviewChatGptNotice()
-        : "고객 후기 파일을 올렸다면 ChatGPT 분석 결과를 확인한 뒤 다음 단계로 넘어갈 수 있습니다.";
+      const message = `고객 후기 파일을 올렸다면 ${getCustomerReviewAnalyzerLabel()} 분석 결과를 확인한 뒤 다음 단계로 넘어갈 수 있습니다.`;
       setCustomerReviewAnalysisError(message);
       setErrorMessage(message);
       document.getElementById("customer-review-upload-section")?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -2212,7 +2183,11 @@ export function PdpMakerClient() {
       setCustomerReviewAnalysisError("");
       setNotice("OpenAI API 키 확인을 마쳤습니다. 고객 후기 영역에서 ChatGPT 분석을 다시 실행해 주세요.");
     } else {
-      setNotice("개인 AI API 키 확인을 마쳤습니다. 이 브라우저에서는 입력한 키로 바로 작업할 수 있습니다.");
+      setNotice(
+        hasSavedOpenAiKey || Boolean(resolveGeminiApiKeyHeaderValue(savedSettings))
+          ? "개인 AI API 키 확인을 마쳤습니다. 이 브라우저에서는 입력한 키로 바로 작업할 수 있습니다."
+          : "API 키 사용을 해제했습니다. 기본 Codex CLI 방식으로 작업합니다."
+      );
     }
     logSetupEvent("setup.api_settings_saved", {
       hasGeminiKey: Boolean(resolveGeminiApiKeyHeaderValue(savedSettings)),
@@ -2449,15 +2424,15 @@ export function PdpMakerClient() {
     ? `후기 파일을 분석했습니다 · 고객 고민/후기 섹션에 실제 문장을 반영`
     : customerReviewSource
       ? isAnalyzingCustomerReviews
-        ? `후기 파일을 gpt-5.4-mini로 분석 중`
-        : `후기 파일 준비 완료 · ChatGPT 분석 결과 확인 후 다음 단계 가능`
+        ? `후기 파일을 ${getCustomerReviewAnalyzerLabel()}로 분석 중`
+        : `후기 파일 준비 완료 · ${getCustomerReviewAnalyzerLabel()} 분석 결과 확인 후 다음 단계 가능`
       : ".xlsx, .csv, .tsv 지원 · 후기/리뷰/내용 컬럼을 자동으로 찾습니다.";
   const customerReviewActionLabel = customerReviewAnalysis || customerReviewSource ? "후기 파일 교체" : "후기 파일 첨부";
   const customerReviewAnalysisButtonLabel = isAnalyzingCustomerReviews
-    ? "ChatGPT 분석 중"
+    ? `${getCustomerReviewAnalyzerLabel()} 분석 중`
     : customerReviewAnalysis
       ? "다시 분석"
-      : "ChatGPT로 후기 분석";
+      : `${getCustomerReviewAnalyzerLabel()}로 후기 분석`;
 
   if (appState === "editor" && result) {
     return (
@@ -2570,13 +2545,13 @@ export function PdpMakerClient() {
               <div className={styles.sidebarStatusRow}>
                 <span>Gemini</span>
                 <strong className={hasAvailableGeminiKey ? styles.sidebarBadgeActive : styles.sidebarBadge}>
-                  {hasAvailableGeminiKey ? "연결 완료" : "키 필요"}
+                  {hasAvailableGeminiKey ? "연결 완료" : "Codex 기본"}
                 </strong>
               </div>
               <div className={styles.sidebarStatusRow}>
                 <span>OpenAI Image 2.0</span>
                 <strong className={hasAvailableOpenAiKey ? styles.sidebarBadgeActive : styles.sidebarBadge}>
-                  {hasAvailableOpenAiKey ? "연결 완료" : "키 필요"}
+                  {hasAvailableOpenAiKey ? "연결 완료" : "Codex 기본"}
                 </strong>
               </div>
               <div className={styles.sidebarStatusRow}>
@@ -2884,7 +2859,7 @@ export function PdpMakerClient() {
                     <span className={styles.panelLabel}>선택 입력</span>
                     <h3 className={styles.optionalUploadTitle}>고객 후기 입력</h3>
                     <p className={styles.optionalUploadDescription}>
-                      엑셀/CSV 후기 데이터를 올리면 ChatGPT가 먼저 분석하고, 확인한 결과를 다음 제작 과정과 섹션 전체에 반영합니다.
+                      엑셀/CSV 후기 데이터를 올리면 {getCustomerReviewAnalyzerLabel()}가 먼저 분석하고, 확인한 결과를 다음 제작 과정과 섹션 전체에 반영합니다.
                     </p>
                   </div>
                 </div>
@@ -2941,16 +2916,16 @@ export function PdpMakerClient() {
                   <div className={styles.reviewAnalysisStatus}>
                     <Loader2 className={styles.spinIcon} size={16} />
                     <div>
-                      <strong>gpt-5.4-mini가 실제 후기 데이터를 분석 중입니다.</strong>
+                      <strong>{getCustomerReviewAnalyzerLabel()}가 실제 후기 데이터를 분석 중입니다.</strong>
                       <span>장점, 반복된 아쉬움, 고객 고민/후기 섹션에 쓸 실제 문장을 분리하고 있습니다.</span>
                     </div>
                   </div>
                 ) : null}
 
-                {customerReviewAnalysisError || customerReviewRequiresChatGptNotice ? (
+                {customerReviewAnalysisError ? (
                   <div className={styles.reviewAnalysisWarning} role="status">
                     <AlertCircle size={16} />
-                    <span>{customerReviewAnalysisError || getCustomerReviewChatGptNotice()}</span>
+                    <span>{customerReviewAnalysisError}</span>
                   </div>
                 ) : null}
 
@@ -3143,15 +3118,15 @@ export function PdpMakerClient() {
                         </span>
                         <strong>{option.label}</strong>
                         <small>{option.description}</small>
-                        <em>{isLocked ? "통이미지는 OpenAI" : hasKey ? option.badge : "API 키 필요"}</em>
+                        <em>{isLocked ? "통이미지는 OpenAI" : hasKey ? option.badge : "Codex CLI"}</em>
                       </button>
                     );
                   })}
                 </div>
-                {!selectedProviderHasKey ? (
+                {selectedProviderUsesCodex ? (
                   <div className={styles.inlineWarning}>
                     <AlertCircle size={16} />
-                    {selectedProviderLabel}를 사용하려면 설정에서 해당 API 키를 저장해 주세요.
+                    개인 API 키가 없어 기본 Codex CLI로 처리합니다.
                   </div>
                 ) : null}
               </div>

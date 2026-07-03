@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import sharp from "sharp";
 import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
+import { generateCodexImage, isCodexImageGenerationAvailable, runCodexJson, type CodexReference } from "./codex-runtime";
 import {
   inferPdpSectionVisualRole,
   inferPdpCopyProductKind,
@@ -415,7 +416,7 @@ export class PdpService {
   }
 
   async analyzeCustomerReviews(request: PdpAnalyzeCustomerReviewsRequest, openAiApiKeyOverride?: string) {
-    const apiKey = this.getRequiredOpenAiApiKey(openAiApiKeyOverride);
+    const apiKey = openAiApiKeyOverride?.trim();
     const source = normalizeCustomerReviewSource(request.source);
 
     if (!source.reviews.length) {
@@ -424,6 +425,10 @@ export class PdpService {
         "후기 파일에서 분석할 수 있는 문장을 찾지 못했습니다.",
         "Customer review source has no usable review rows."
       );
+    }
+
+    if (!apiKey) {
+      return this.analyzeCustomerReviewsWithCodex(request, source);
     }
 
     const modelAccess = await getCachedModelAccess("openai", apiKey, OPENAI_CUSTOMER_REVIEW_MODEL, () =>
@@ -467,12 +472,20 @@ export class PdpService {
 
   async analyzeProduct(request: PdpAnalyzeRequest, geminiApiKeyOverride?: string, openAiApiKeyOverride?: string) {
     const aiProvider = normalizeAiProvider(request.aiProvider);
+    const geminiApiKey = geminiApiKeyOverride?.trim();
+    const openAiApiKey = openAiApiKeyOverride?.trim();
 
     if (aiProvider === "openai") {
-      return this.analyzeProductWithOpenAi(request, openAiApiKeyOverride);
+      return openAiApiKey
+        ? this.analyzeProductWithOpenAi(request, openAiApiKey)
+        : this.analyzeProductWithCodex(request);
     }
 
-    const apiKey = this.getRequiredApiKey(geminiApiKeyOverride);
+    if (!geminiApiKey) {
+      return this.analyzeProductWithCodex(request);
+    }
+
+    const apiKey = geminiApiKey;
     const normalizedImage = sanitizeBase64Payload(request.imageBase64);
     const mimeType = normalizeMimeType(request.mimeType);
     const generationImage = request.generationImageBase64
@@ -723,8 +736,11 @@ export class PdpService {
     const aiProvider = normalizeAiProvider(request.aiProvider);
 
     if (aiProvider === "openai") {
+      const apiKey = openAiApiKeyOverride?.trim();
+      if (!apiKey) {
+        return this.transcribeStripsWithCodex(strips, prompt);
+      }
       return retryOperation(async () => {
-        const apiKey = this.getRequiredOpenAiApiKey(openAiApiKeyOverride);
         const response = await openAiJsonRequest<OpenAiResponsePayload>(apiKey, "/responses", {
           method: "POST",
           body: {
@@ -763,8 +779,13 @@ export class PdpService {
       });
     }
 
+    const geminiApiKey = geminiApiKeyOverride?.trim();
+    if (!geminiApiKey) {
+      return this.transcribeStripsWithCodex(strips, prompt);
+    }
+
     return retryOperation(async () => {
-      const apiKey = this.getRequiredApiKey(geminiApiKeyOverride);
+      const apiKey = geminiApiKey;
       const client = this.createClient(apiKey);
       const response = await client.models.generateContent({
         model: ANALYZE_MODEL,
@@ -815,11 +836,14 @@ export class PdpService {
     const outputMode: PdpOutputMode =
       request.productContext?.outputMode === "full-image" ? "full-image" : "editable";
     const prompt = buildExpandPrompt(request);
+    const openAiApiKey = openAiApiKeyOverride?.trim();
+    const geminiApiKey = geminiApiKeyOverride?.trim();
 
     const payload =
       aiProvider === "openai"
-        ? await retryOperation(async () => {
-            const apiKey = this.getRequiredOpenAiApiKey(openAiApiKeyOverride);
+        ? openAiApiKey
+          ? await retryOperation(async () => {
+            const apiKey = openAiApiKey;
             const response = await openAiJsonRequest<OpenAiResponsePayload>(apiKey, "/responses", {
               method: "POST",
               body: {
@@ -838,8 +862,10 @@ export class PdpService {
             const text = extractOpenAiResponseText(response);
             return parseExpandPayload(extractJsonCandidate(text) ?? text, "openai", outputMode);
           })
-        : await retryOperation(async () => {
-            const apiKey = this.getRequiredApiKey(geminiApiKeyOverride);
+          : await this.expandLandingPageWithCodex(prompt, outputMode)
+        : geminiApiKey
+          ? await retryOperation(async () => {
+            const apiKey = geminiApiKey;
             const client = this.createClient(apiKey);
             const response = await client.models.generateContent({
               model: ANALYZE_MODEL,
@@ -851,7 +877,8 @@ export class PdpService {
               }
             });
             return parseExpandPayload(extractResponseText(response), "gemini", outputMode);
-          });
+          })
+          : await this.expandLandingPageWithCodex(prompt, outputMode);
 
     return {
       ok: true,
@@ -870,12 +897,20 @@ export class PdpService {
     options?: ImageGenOptions;
   }, geminiApiKeyOverride?: string, openAiApiKeyOverride?: string) {
     const aiProvider = normalizeAiProvider(request.options?.aiProvider);
+    const geminiApiKey = geminiApiKeyOverride?.trim();
+    const openAiApiKey = openAiApiKeyOverride?.trim();
 
     if (aiProvider === "openai") {
-      return this.generateSectionImageWithOpenAi(request, openAiApiKeyOverride);
+      return openAiApiKey
+        ? this.generateSectionImageWithOpenAi(request, openAiApiKey)
+        : this.generateSectionImageWithCodex(request);
     }
 
-    const apiKey = this.getRequiredApiKey(geminiApiKeyOverride);
+    if (!geminiApiKey) {
+      return this.generateSectionImageWithCodex(request);
+    }
+
+    const apiKey = geminiApiKey;
     const client = this.createClient(apiKey);
     const imageModelAccess = await getCachedModelAccess("gemini", apiKey, IMAGE_MODEL, () =>
       checkModelAccess(apiKey, IMAGE_MODEL)
@@ -913,6 +948,276 @@ export class PdpService {
       imageBase64: image.base64,
       mimeType: image.mimeType
     };
+  }
+
+  private async analyzeCustomerReviewsWithCodex(
+    request: PdpAnalyzeCustomerReviewsRequest,
+    source: PdpCustomerReviewSource
+  ) {
+    let jsonText: string;
+    try {
+      jsonText = await runCodexJson({
+        references: [],
+        prompt: [
+          "당신은 한국 이커머스 고객 후기 분석가입니다. 제공된 후기 행만 사용하고, 아래 요청의 JSON만 반환하세요.",
+          buildCustomerReviewAnalysisPrompt(source, request.productContext, request.desiredTone)
+        ].join("\n\n")
+      });
+    } catch (error) {
+      throw new PdpServiceError(
+        "PDP_ANALYZE_FAILED",
+        "Codex CLI로 후기 분석을 완료하지 못했습니다.",
+        stringifyError(error)
+      );
+    }
+
+    try {
+      const parsed = JSON.parse(extractJsonCandidate(jsonText) ?? jsonText) as Partial<PdpCustomerReviewAnalysis>;
+      const analysis = normalizeCustomerReviewAnalysisResponse(parsed, source);
+      if (!analysis.topBenefits.length || (!analysis.painPoints.length && !analysis.improvementPromises.length)) {
+        throw new Error("Customer review analysis did not include enough benefits or pain points.");
+      }
+      return analysis;
+    } catch (error) {
+      throw new PdpServiceError(
+        "GEMINI_RESPONSE_INVALID",
+        "Codex CLI 후기 분석 응답을 해석하지 못했습니다. 같은 파일로 다시 시도해 주세요.",
+        stringifyError(error)
+      );
+    }
+  }
+
+  private async analyzeProductWithCodex(request: PdpAnalyzeRequest) {
+    if (!isCodexImageGenerationAvailable()) {
+      throw new PdpServiceError(
+        "PDP_IMAGE_GENERATION_FAILED",
+        "Codex CLI 이미지 생성 기능이 꺼져 있습니다.",
+        "codex -c service_tier=fast --enable image_generation features list 로 image_generation=true 상태를 확인해 주세요."
+      );
+    }
+
+    const normalizedImage = sanitizeBase64Payload(request.imageBase64);
+    const mimeType = normalizeMimeType(request.mimeType);
+    const generationImage = request.generationImageBase64
+      ? sanitizeBase64Payload(request.generationImageBase64)
+      : normalizedImage;
+    const generationMimeType = resolveImageMimeType(
+      generationImage,
+      request.generationImageMimeType ?? request.mimeType
+    );
+    const referenceModelImage = normalizeReferenceModelImage(request.modelImageBase64, request.modelImageMimeType);
+    const sourceMaterials = normalizeAnalyzeSourceMaterials(request.sourceMaterials);
+    const analysisStrips = normalizeAnalysisStrips(request.analysisStrips);
+    const references = [
+      ...(analysisStrips.length
+        ? toCodexStripReferences(analysisStrips)
+        : [toCodexReference("product-reference", mimeType, normalizedImage)]),
+      ...toCodexSourceMaterialReferences(sourceMaterials),
+      ...(referenceModelImage
+        ? [toCodexReference("model-reference", referenceModelImage.mimeType, referenceModelImage.base64)]
+        : [])
+    ];
+
+    let jsonText: string;
+    try {
+      jsonText = await runCodexJson({
+        references,
+        prompt: [
+          buildAnalyzePrompt(
+            normalizeSourceMode(request.sourceMode),
+            normalizeOutputMode(request.outputMode),
+            request.additionalInfo,
+            request.desiredTone,
+            null,
+            request.sectionCount,
+            request.benefits,
+            request.imageOptimization,
+            sourceMaterials,
+            request.knowledgeText,
+            request.customerReviewAnalysis,
+            request.longPageTranscript
+          ),
+          analysisStrips.length
+            ? "입력 이미지들은 긴 상세페이지를 위에서 아래로 자른 연속 스트립입니다. productCutRegion은 전체 페이지 기준 y 비율로 작성하세요."
+            : "",
+          sourceMaterials.length
+            ? "보조 자료 이미지가 함께 제공된 경우 sourceMaterials의 순서와 파일명을 기준으로 참고하세요."
+            : "",
+          referenceModelImage
+            ? "참고 모델 이미지가 함께 제공되었습니다. 모델이 등장하는 컷은 마지막 모델 참조 이미지를 동일 인물 기준으로 사용하세요."
+            : ""
+        ].filter(Boolean).join("\n\n")
+      });
+    } catch (error) {
+      throw new PdpServiceError(
+        "PDP_ANALYZE_FAILED",
+        "Codex CLI로 제품 분석을 완료하지 못했습니다.",
+        stringifyError(error)
+      );
+    }
+
+    const blueprint = parseBlueprintResponse({ text: extractJsonCandidate(jsonText) ?? jsonText });
+    const firstSection = blueprint.sections[0];
+
+    if (!firstSection) {
+      throw new PdpServiceError(
+        "GEMINI_RESPONSE_INVALID",
+        "상세페이지 섹션을 생성하지 못했습니다.",
+        "No sections returned from Codex analyze response."
+      );
+    }
+
+    const heroReference = await resolveLongDetailHeroReference({
+      strips: analysisStrips,
+      productCutRegion: blueprint.productCutRegion,
+      fallbackBase64: generationImage,
+      fallbackMimeType: generationMimeType
+    });
+
+    if (request.deferHeroGeneration && analysisStrips.length) {
+      return {
+        originalImage: heroReference.base64,
+        originalImageMimeType: heroReference.mimeType,
+        originalImageFileName: buildImageFileName("product-reference", heroReference.mimeType),
+        blueprint
+      };
+    }
+
+    const firstImage = await this.generateSectionImageWithCodex({
+      originalImageBase64: heroReference.base64,
+      originalImageMimeType: heroReference.mimeType,
+      originalImageFileName: buildImageFileName("product-reference", heroReference.mimeType),
+      section: firstSection,
+      aspectRatio: request.aspectRatio,
+      desiredTone: request.desiredTone,
+      options: {
+        aiProvider: normalizeAiProvider(request.aiProvider),
+        style: "studio",
+        withModel: true,
+        modelGender: "female",
+        modelAgeRange: "20s",
+        modelCountry: "korea",
+        guidePriorityMode: "guide-first",
+        outputMode: normalizeOutputMode(request.outputMode),
+        headline: firstSection.headline,
+        subheadline: firstSection.subheadline,
+        referenceModelImageBase64: referenceModelImage?.base64,
+        referenceModelImageMimeType: referenceModelImage?.mimeType,
+        referenceModelImageFileName: request.modelImageFileName
+      }
+    });
+
+    blueprint.sections[0] = {
+      ...firstSection,
+      generatedImage: toDataUrl(firstImage.mimeType, firstImage.imageBase64)
+    };
+
+    return {
+      originalImage: heroReference.base64,
+      originalImageMimeType: heroReference.mimeType,
+      originalImageFileName: buildImageFileName("product-reference", heroReference.mimeType),
+      blueprint
+    };
+  }
+
+  private async transcribeStripsWithCodex(strips: NormalizedAnalysisStrip[], prompt: string) {
+    let jsonText: string;
+    try {
+      jsonText = await runCodexJson({
+        references: toCodexStripReferences(strips),
+        prompt: [
+          prompt,
+          "반환 JSON 형식: {\"transcript\":\"...\",\"lastSectionType\":\"...\"}"
+        ].join("\n\n")
+      });
+    } catch (error) {
+      throw new PdpServiceError(
+        "PDP_ANALYZE_FAILED",
+        "Codex CLI로 상세페이지 전사를 완료하지 못했습니다.",
+        stringifyError(error)
+      );
+    }
+
+    return parseTranscriptPayload(extractJsonCandidate(jsonText) ?? jsonText, "gemini");
+  }
+
+  private async expandLandingPageWithCodex(prompt: string, outputMode: PdpOutputMode) {
+    let jsonText: string;
+    try {
+      jsonText = await runCodexJson({
+        references: [],
+        prompt
+      });
+    } catch (error) {
+      throw new PdpServiceError(
+        "PDP_ANALYZE_FAILED",
+        "Codex CLI로 상세페이지 확장을 완료하지 못했습니다.",
+        stringifyError(error)
+      );
+    }
+
+    return parseExpandPayload(extractJsonCandidate(jsonText) ?? jsonText, "gemini", outputMode);
+  }
+
+  private async generateSectionImageWithCodex(request: {
+    originalImageBase64: string;
+    originalImageMimeType?: string;
+    originalImageFileName?: string;
+    section: SectionBlueprint;
+    aspectRatio: AspectRatio;
+    desiredTone?: string;
+    options?: ImageGenOptions;
+  }) {
+    const originalImageBase64 = sanitizeBase64Payload(request.originalImageBase64);
+    const originalImageMimeType = resolveImageMimeType(originalImageBase64, request.originalImageMimeType);
+    const section = normalizeSection(request.section, 0);
+    const normalizedReferenceModel = normalizeReferenceModelImage(
+      request.options?.referenceModelImageBase64,
+      request.options?.referenceModelImageMimeType
+    );
+    const options = normalizeImageOptions({
+      ...request.options,
+      guidePriorityMode: request.options?.guidePriorityMode ?? "guide-first",
+      outputMode: normalizeOutputMode(request.options?.outputMode)
+    });
+    const prompt = [
+      `Aspect ratio: ${request.aspectRatio}.`,
+      buildImagePrompt(section, request.desiredTone, {
+        ...options,
+        referenceModelImageBase64: normalizedReferenceModel?.base64,
+        referenceModelImageMimeType: normalizedReferenceModel?.mimeType
+      })
+    ].join("\n\n");
+    const references = [
+      toCodexReference(
+        buildImageFileName(request.originalImageFileName, originalImageMimeType, "product-reference"),
+        originalImageMimeType,
+        originalImageBase64
+      ),
+      ...(normalizedReferenceModel
+        ? [
+            toCodexReference(
+              request.options?.referenceModelImageFileName || "model-reference.jpg",
+              normalizedReferenceModel.mimeType,
+              normalizedReferenceModel.base64
+            )
+          ]
+        : [])
+    ];
+
+    try {
+      const image = await generateCodexImage({ prompt, references });
+      return {
+        imageBase64: image.buffer.toString("base64"),
+        mimeType: image.mimeType
+      };
+    } catch (error) {
+      throw new PdpServiceError(
+        "PDP_IMAGE_GENERATION_FAILED",
+        "Codex CLI로 이미지를 생성하지 못했습니다.",
+        stringifyError(error)
+      );
+    }
   }
 
   private async analyzeProductWithOpenAi(request: PdpAnalyzeRequest, openAiApiKeyOverride?: string) {
@@ -4038,6 +4343,36 @@ async function openAiImageEditRequest(
     base64,
     mimeType: payload.data?.[0]?.mime_type || "image/jpeg"
   };
+}
+
+function toCodexReference(name: string, mimeType: string, base64: string): CodexReference {
+  return {
+    name,
+    mimeType: normalizeMimeType(mimeType),
+    buffer: Buffer.from(sanitizeBase64Payload(base64), "base64")
+  };
+}
+
+function toCodexStripReferences(strips: NormalizedAnalysisStrip[]) {
+  return strips.map((strip, index) =>
+    toCodexReference(
+      `detail-strip-${String(index + 1).padStart(2, "0")}`,
+      strip.mimeType,
+      strip.base64
+    )
+  );
+}
+
+function toCodexSourceMaterialReferences(sourceMaterials: PdpSourceMaterial[]) {
+  return sourceMaterials
+    .filter((material) => material.role !== "primary" && material.imageBase64 && material.imageMimeType)
+    .map((material, index) =>
+      toCodexReference(
+        `source-material-${index + 1}-${material.fileName || "reference"}`,
+        material.imageMimeType || DEFAULT_IMAGE_MIME,
+        material.imageBase64 || ""
+      )
+    );
 }
 
 function base64ToBlob(base64: string, mimeType: string) {

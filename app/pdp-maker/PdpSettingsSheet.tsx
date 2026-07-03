@@ -44,7 +44,13 @@ export function PdpSettingsSheet({
     const candidateOpenAiKey = localSettings.customOpenAiApiKey.trim();
 
     if (!candidateGeminiKey && !candidateOpenAiKey) {
-      setErrorMessage("Gemini 또는 OpenAI API 키 중 하나 이상을 입력해 주세요.");
+      onSave({
+        customGeminiApiKey: "",
+        customOpenAiApiKey: "",
+        preferredAiProvider: ""
+      });
+      setSuccessMessage("API 키 사용을 해제했습니다. 기본 Codex CLI 방식으로 작업합니다.");
+      onOpenChange(false);
       return;
     }
 
@@ -112,7 +118,7 @@ export function PdpSettingsSheet({
           </div>
           <SheetTitle className={styles.settingsSheetTitle}>AI API 키 설정</SheetTitle>
           <SheetDescription className={styles.settingsSheetDescription}>
-            이 앱은 서버 기본 키 없이, 사용자 본인의 Gemini 또는 OpenAI API 키로 동작합니다. 입력한 키는 이 브라우저에만 저장됩니다.
+            기본은 Codex CLI로 실행합니다. 직접 Gemini 또는 OpenAI API를 쓰고 싶을 때만 개인 키를 저장하세요.
           </SheetDescription>
         </SheetHeader>
 
@@ -167,7 +173,7 @@ export function PdpSettingsSheet({
           <section className={styles.settingsCard}>
             <div className={styles.settingsLockedNotice}>
               <ShieldCheck size={16} />
-              공개 배포 안전을 위해 서버 기본 키는 사용하지 않습니다. 개인 키는 localStorage에만 저장됩니다.
+              키를 비워 저장하면 기본 Codex CLI 방식으로 돌아갑니다. 개인 키는 localStorage에만 저장됩니다.
             </div>
 
             <div className={styles.settingsModeGrid}>
@@ -232,7 +238,7 @@ export function PdpSettingsSheet({
             </label>
 
             <p className={styles.settingsHelper}>
-              Gemini는 기존 생성 경로를 사용합니다. OpenAI는 분석에 GPT-5.5, 이미지 생성/편집에 gpt-image-2-2026-04-21을 사용합니다.
+              개인 키를 입력하면 해당 API를 직접 사용하고, 비워두면 이 PC의 Codex CLI 로그인으로 처리합니다.
             </p>
 
             {errorMessage ? <div className={styles.settingsError}>{errorMessage}</div> : null}
