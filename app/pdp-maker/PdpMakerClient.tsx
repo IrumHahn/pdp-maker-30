@@ -344,8 +344,8 @@ export function PdpMakerClient() {
   const selectedProviderLabel = AI_PROVIDER_OPTIONS.find((option) => option.value === processingProvider)?.label ?? "Gemini";
   const selectedOutputMode = OUTPUT_MODE_OPTIONS.find((option) => option.value === outputMode) ?? OUTPUT_MODE_OPTIONS[0];
   const estimatedProcessingSeconds = useMemo(
-    () => (processingProvider === "openai" ? 180 : 150) + INITIAL_HERO_SECTION_COUNT * 20 + (modelImage ? 30 : 0),
-    [modelImage, processingProvider]
+    () => (selectedProviderUsesCodex ? 540 : processingProvider === "openai" ? 180 : 150) + INITIAL_HERO_SECTION_COUNT * 20 + (modelImage ? 30 : 0),
+    [modelImage, processingProvider, selectedProviderUsesCodex]
   );
   const elapsedProcessingSeconds = loadingStartedAt ? Math.max(0, Math.floor((Date.now() - loadingStartedAt) / 1000)) : 0;
   const remainingProcessingSeconds = loadingStartedAt
@@ -2768,8 +2768,9 @@ export function PdpMakerClient() {
                 hint={
                   isReadingSourceMaterials
                     ? "자료를 읽는 중입니다."
-                    : `최대 8개 · 상세페이지 이미지는 최대 ${MAX_TRANSCRIBE_PAGES}장까지 원문 반영 · PDF는 텍스트 반영`
+                    : `최대 8개 · Ctrl+V 캡처 붙여넣기 가능 · 상세페이지 이미지는 최대 ${MAX_TRANSCRIBE_PAGES}장까지 원문 반영`
                 }
+                enablePaste
                 multiple
                 onSelect={handleSourceMaterialFiles}
                 selectedFileName={sourceMaterialDropzoneLabel}
@@ -3467,6 +3468,7 @@ function UploadDropzone({
   compact = false,
   description,
   disabled = false,
+  enablePaste = false,
   hint,
   multiple = false,
   onSelect,
@@ -3477,6 +3479,7 @@ function UploadDropzone({
   compact?: boolean;
   description: string;
   disabled?: boolean;
+  enablePaste?: boolean;
   hint: string;
   multiple?: boolean;
   onSelect: (files: File[]) => Promise<void>;
@@ -3485,6 +3488,29 @@ function UploadDropzone({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
+
+  useEffect(() => {
+    if (!enablePaste || disabled) {
+      return;
+    }
+
+    const handlePaste = (event: ClipboardEvent) => {
+      if (event.defaultPrevented || isEditablePasteTarget(event.target)) {
+        return;
+      }
+
+      const files = getImageFilesFromClipboard(event.clipboardData);
+      if (!files.length) {
+        return;
+      }
+
+      event.preventDefault();
+      void onSelect(multiple ? files : files.slice(0, 1));
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [disabled, enablePaste, multiple, onSelect]);
 
   const handleDrag = (event: DragEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -3547,6 +3573,49 @@ function UploadDropzone({
       </button>
     </>
   );
+}
+
+function getImageFilesFromClipboard(clipboardData: DataTransfer | null) {
+  const itemFiles = Array.from(clipboardData?.items ?? [])
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+
+  const files = itemFiles.length
+    ? itemFiles
+    : Array.from(clipboardData?.files ?? []).filter((file) => file.type.startsWith("image/"));
+
+  return files.map((file, index) => normalizeClipboardImageFile(file, index));
+}
+
+function normalizeClipboardImageFile(file: File, index: number) {
+  const mimeType = file.type || "image/png";
+  const genericName = !file.name || /^image\.(png|jpe?g|webp|gif|avif)$/i.test(file.name);
+  if (!genericName) {
+    return file;
+  }
+
+  const extension = extensionFromImageMimeType(mimeType);
+  return new File([file], `clipboard-image-${Date.now()}-${index + 1}.${extension}`, {
+    type: mimeType,
+    lastModified: Date.now()
+  });
+}
+
+function extensionFromImageMimeType(mimeType: string) {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/webp") return "webp";
+  if (mimeType === "image/gif") return "gif";
+  if (mimeType === "image/avif") return "avif";
+  return "png";
+}
+
+function isEditablePasteTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true'], [contenteditable='plaintext-only'], [role='textbox']"));
 }
 
 function renderRatioIcon(icon: "square" | "portrait" | "phone" | "landscape" | "wide") {

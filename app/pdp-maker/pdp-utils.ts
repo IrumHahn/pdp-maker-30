@@ -35,9 +35,9 @@ export const TONE_OPTIONS = [
 ];
 
 // Default request timeout. Generation calls (analyze/images/customer-reviews) pass
-// GENERATION_API_TIMEOUT_MS because paid image generation can legitimately take minutes.
+// GENERATION_API_TIMEOUT_MS because Codex CLI image generation can legitimately take several minutes.
 export const DEFAULT_API_TIMEOUT_MS = 120_000;
-export const GENERATION_API_TIMEOUT_MS = 240_000;
+export const GENERATION_API_TIMEOUT_MS = 600_000;
 
 export async function apiJson<T>(
   path: string,

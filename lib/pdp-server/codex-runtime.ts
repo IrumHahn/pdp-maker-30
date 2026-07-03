@@ -200,7 +200,7 @@ function runCodexExec({
     const timer = setTimeout(() => {
       killProcessTree(child.pid);
       reject(new Error("Codex CLI 처리 시간이 초과되었습니다."));
-    }, Number(process.env.CODEX_IMAGE_TIMEOUT_MS || 300_000));
+    }, Number(process.env.CODEX_IMAGE_TIMEOUT_MS || 600_000));
 
     child.stdout.on("data", (chunk) => {
       stdout = appendLimited(stdout, chunk.toString());
