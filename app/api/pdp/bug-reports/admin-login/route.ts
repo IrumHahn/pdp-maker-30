@@ -30,7 +30,11 @@ export async function POST(request: Request) {
     response.cookies.set(PDP_BUG_REPORT_ADMIN_COOKIE, sessionValue, {
       httpOnly: true,
       maxAge: COOKIE_MAX_AGE_SECONDS,
-      path: "/pdp-maker/admin",
+      // Must be "/" so the session cookie is also sent on POST to
+      // /api/pdp/bug-reports/admin-actions (a different path prefix than the
+      // admin page). A narrower path let the page load but silently bounced
+      // every form action to ?login=failed.
+      path: "/",
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production"
     });

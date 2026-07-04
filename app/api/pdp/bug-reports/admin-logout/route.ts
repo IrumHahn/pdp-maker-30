@@ -11,7 +11,8 @@ export async function POST(request: Request) {
     expires: new Date(0),
     httpOnly: true,
     maxAge: 0,
-    path: "/pdp-maker/admin",
+    // Match the login cookie path ("/") so logout actually clears it.
+    path: "/",
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production"
   });
