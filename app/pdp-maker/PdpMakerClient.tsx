@@ -185,7 +185,7 @@ const OUTPUT_MODE_OPTIONS: Array<{
     value: "full-image",
     label: "통이미지 모드",
     description: "카피와 디자인까지 이미지 안에 포함된 섹션으로 만듭니다.",
-    badge: "OpenAI 고정"
+    badge: "Gemini · OpenAI 지원"
   },
   {
     value: "editable",
@@ -331,7 +331,7 @@ export function PdpMakerClient() {
   const effectiveOpenAiApiKey = resolveOpenAiApiKeyHeaderValue(clientSettings);
   const hasAvailableGeminiKey = Boolean(effectiveGeminiApiKey);
   const hasAvailableOpenAiKey = Boolean(effectiveOpenAiApiKey);
-  const processingProvider: PdpAiProvider = outputMode === "full-image" ? "openai" : aiProvider;
+  const processingProvider: PdpAiProvider = aiProvider;
   const selectedProviderHasKey = processingProvider === "openai" ? hasAvailableOpenAiKey : hasAvailableGeminiKey;
   const hasPendingCustomerReviewAnalysis = Boolean(customerReviewSource && !customerReviewAnalysis);
   const customerReviewRequiresChatGptNotice = Boolean(customerReviewSource && !customerReviewAnalysis && !hasAvailableOpenAiKey);
@@ -3089,15 +3089,11 @@ export function PdpMakerClient() {
                             return;
                           }
                           setOutputMode(option.value);
-                          if (option.value === "full-image") {
-                            setAiProvider("openai");
-                          }
                           setErrorMessage("");
                           setErrorDetail("");
                           setShowErrorDetail(false);
                           logSetupEvent("setup.output_mode_selected", {
-                            outputMode: option.value,
-                            forcedProvider: option.value === "full-image" ? "openai" : null
+                            outputMode: option.value
                           });
                         }}
                         style={isLocked ? { cursor: "not-allowed", opacity: 0.58 } : undefined}
@@ -3120,14 +3116,12 @@ export function PdpMakerClient() {
                 <span className={styles.fieldLabel}>AI 모델</span>
                 <div className={styles.providerGrid}>
                   {AI_PROVIDER_OPTIONS.map((option) => {
-                    const isLocked = outputMode === "full-image" && option.value !== "openai";
                     const isActive = processingProvider === option.value;
                     const hasKey = option.value === "openai" ? hasAvailableOpenAiKey : hasAvailableGeminiKey;
 
                     return (
                       <button
-                        className={isLocked ? styles.providerCardDisabled : isActive ? styles.providerCardActive : styles.providerCard}
-                        disabled={isLocked}
+                        className={isActive ? styles.providerCardActive : styles.providerCard}
                         key={option.value}
                         onClick={() => {
                           setAiProvider(option.value);
@@ -3143,7 +3137,7 @@ export function PdpMakerClient() {
                         </span>
                         <strong>{option.label}</strong>
                         <small>{option.description}</small>
-                        <em>{isLocked ? "통이미지는 OpenAI" : hasKey ? option.badge : "API 키 필요"}</em>
+                        <em>{hasKey ? option.badge : "API 키 필요"}</em>
                       </button>
                     );
                   })}
