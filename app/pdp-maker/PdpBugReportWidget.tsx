@@ -286,8 +286,14 @@ export function PdpBugReportWidget({ context }: PdpBugReportWidgetProps) {
         title={isOpen ? "문의하기 닫기" : "문의하기"}
         type="button"
       >
-        {isOpen ? <X size={18} /> : null}
-        <span>{isOpen ? "닫기" : "문의하기"}</span>
+        {isOpen ? (
+          <X size={18} />
+        ) : (
+          <span aria-hidden="true" className={styles.bugReportFabQuestion}>
+            ?
+          </span>
+        )}
+        <span className={styles.bugReportFabLabel}>{isOpen ? "닫기" : "문의하기"}</span>
       </button>
     </div>
   );
